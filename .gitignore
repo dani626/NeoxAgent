@@ -1,0 +1,20 @@
+# Rust
+/target
+# Cargo.lock - Recommended to keep for binaries, remove below if you want to track versions
+# /Cargo.lock
+
+# Logs
+*.log
+agent.log
+
+# Temporary
+*.tmp
+*.bak
+deploy_nginx_demo.sh.log
+
+# IDE
+.vscode/
+.idea/
+
+# Scripts output
+temp_index.html

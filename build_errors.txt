@@ -1,0 +1,84 @@
+﻿cargo :     Checking neox-agent v0.1.0 
+(C:\proyectos\NeoxAgent)
+En línea: 1 Carácter: 1
++ cargo check 2>&1 | Out-File -FilePath 
+C:\proyectos\NeoxAgent\build_er ...
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Chec 
+   king ne...ctos\NeoxAgent):String) [], RemoteExcep  
+  tion
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: struct `BackupListResponse` is never 
+constructed
+  --> src\models\backups.rs:45:12
+   |
+45 | pub struct BackupListResponse {
+   |            ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: struct `NetworkListResponse` is never 
+constructed
+  --> src\models\network.rs:58:12
+   |
+58 | pub struct NetworkListResponse {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: field `network` is never read
+  --> src\models\pod.rs:28:9
+   |
+11 | pub struct CreatePodRequest {
+   |            ---------------- field in this struct
+...
+28 |     pub network: Option<String>,
+   |         ^^^^^^^
+   |
+   = note: `CreatePodRequest` has a derived impl for 
+the trait `Debug`, but this is intentionally ignored 
+during dead code analysis
+
+warning: field `proxy_type` is never read
+  --> src\models\pod.rs:38:9
+   |
+33 | pub struct ProxyConfig {
+   |            ----------- field in this struct
+...
+38 |     pub proxy_type: Option<String>,
+   |         ^^^^^^^^^^
+   |
+   = note: `ProxyConfig` has a derived impl for the 
+trait `Debug`, but this is intentionally ignored 
+during dead code analysis
+
+warning: field `restart_policy` is never read
+  --> src\models\pod.rs:75:9
+   |
+55 | pub struct PodContainerSpec {
+   |            ---------------- field in this struct
+...
+75 |     pub restart_policy: Option<String>,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `PodContainerSpec` has a derived impl for 
+the trait `Debug`, but this is intentionally ignored 
+during dead code analysis
+
+warning: struct `PodListResponse` is never constructed
+   --> src\models\pod.rs:116:12
+    |
+116 | pub struct PodListResponse {
+    |            ^^^^^^^^^^^^^^^
+
+warning: struct `PodActionResponse` is never 
+constructed
+   --> src\models\pod.rs:147:12
+    |
+147 | pub struct PodActionResponse {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: `neox-agent` (bin "neox-agent") generated 7 
+warnings
+    Finished `dev` profile [unoptimized + debuginfo] 
+target(s) in 2.68s
