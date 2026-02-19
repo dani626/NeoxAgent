@@ -1,0 +1,25 @@
+[agent]
+host = "0.0.0.0"
+port = 8443
+api_key = "change-me-to-a-secure-random-string"
+data_dir = "/var/lib/neoxhost"
+
+[podman]
+socket = "unix:///run/podman/podman.sock"
+volumes_dir = "/var/lib/neoxhost/volumes"
+
+[tls]
+enabled = false
+cert_path = ""
+key_path = ""
+
+[defaults]
+restart_policy = "always"
+dns = ["1.1.1.1", "8.8.8.8"]
+
+[backups]
+max_per_server = 5
+max_size_gb = 10
+retention_days = 30
+compression_level = 6
+stop_server_before_backup = true

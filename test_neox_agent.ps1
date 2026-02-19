@@ -40,7 +40,7 @@ function Test-Endpoint {
     }
 }
 
-Write-Host "🚀 Starting NeoxAgent Integration Tests" -ForegroundColor Cyan
+Write-Host "🚀 Starting neoxagent Integration Tests" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
 # 1. Health Check
@@ -82,9 +82,9 @@ if ($Pod) {
     Write-Host "Created Pod ID: $PodId" -ForegroundColor Cyan
 
     # 5. Phase 5: File Manager
-    Test-Endpoint -Method PUT -Path "/api/pods/$PodId/files/content?path=/hello.txt" -Title "Write File" -Body @{ content = "Hello NeoxAgent!" } | Out-Null
+    Test-Endpoint -Method PUT -Path "/api/pods/$PodId/files/content?path=/hello.txt" -Title "Write File" -Body @{ content = "Hello neoxagent!" } | Out-Null
     $FileContent = Test-Endpoint -Method GET -Path "/api/pods/$PodId/files/content?path=/hello.txt" -Title "Read File"
-    if ($FileContent.content -eq "Hello NeoxAgent!") {
+    if ($FileContent.content -eq "Hello neoxagent!") {
         Write-Host "   File Content Match ✅" -ForegroundColor Green
     } else {
         Write-Host "   File Content Mismatch ❌" -ForegroundColor Red

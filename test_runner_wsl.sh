@@ -6,7 +6,7 @@ API_URL="http://127.0.0.1:8443"
 API_KEY="change-me-to-a-secure-random-string"
 PODMAN_SOCK="/tmp/podman_test.sock"
 
-echo "🚀 Starting NeoxAgent Integration Tests (WSL)"
+echo "🚀 Starting neoxagent Integration Tests (WSL)"
 echo "============================================"
 
 # 1. Start Podman API Socket
@@ -27,8 +27,8 @@ fi
 # Update config.toml to use this socket temporarily
 sed -i 's|socket = ".*"|socket = "/tmp/podman_test.sock"|' config.toml
 
-# 2. Start NeoxAgent
-echo "🦀 Starting NeoxAgent..."
+# 2. Start neoxagent
+echo "🦀 Starting neoxagent..."
 cargo build --quiet
 cargo run --quiet > agent.log 2>&1 &
 AGENT_PID=$!

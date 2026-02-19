@@ -922,7 +922,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "neox-agent"
+name = "neoxagent"
 version = "0.1.0"
 dependencies = [
  "axum",

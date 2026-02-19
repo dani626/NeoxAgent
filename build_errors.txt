@@ -1,11 +1,11 @@
-﻿cargo :     Checking neox-agent v0.1.0 
-(C:\proyectos\NeoxAgent)
+﻿cargo :     Checking neoxagent v0.1.0 
+(C:\proyectos\neoxagent)
 En línea: 1 Carácter: 1
 + cargo check 2>&1 | Out-File -FilePath 
-C:\proyectos\NeoxAgent\build_er ...
+C:\proyectos\neoxagent\build_er ...
 + ~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (    Chec 
-   king ne...ctos\NeoxAgent):String) [], RemoteExcep  
+   king ne...ctos\neoxagent):String) [], RemoteExcep  
   tion
     + FullyQualifiedErrorId : NativeCommandError
  
@@ -78,7 +78,7 @@ constructed
 147 | pub struct PodActionResponse {
     |            ^^^^^^^^^^^^^^^^^
 
-warning: `neox-agent` (bin "neox-agent") generated 7 
+warning: `neoxagent` (bin "neoxagent") generated 7 
 warnings
     Finished `dev` profile [unoptimized + debuginfo] 
 target(s) in 2.68s

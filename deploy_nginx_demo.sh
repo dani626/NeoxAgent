@@ -14,7 +14,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${CYAN}🚀 NeoxAgent: Full Nginx Deployment Demo${NC}"
+echo -e "${CYAN}🚀 neoxagent: Full Nginx Deployment Demo${NC}"
 echo "============================================"
 
 # --- Prerequisites: Start Podman Socket & Agent ---
@@ -22,7 +22,7 @@ echo "============================================"
 echo -e "${BLUE}🔌 Starting Infrastructure...${NC}"
 # 0. Cleanup residuals from previous runs
 echo -e "${BLUE}🧹 Cleaning up previous runs...${NC}"
-# CRITICAL: Kill any old NeoxAgent instances on port 8443
+# CRITICAL: Kill any old neoxagent instances on port 8443
 pkill -f 'neox.agent' 2>/dev/null || true
 pkill -f 'target/debug/neox' 2>/dev/null || true
 # Wait for port to free up
@@ -64,7 +64,7 @@ AGENT_PID=$!
 
 echo -n "⏳ Waiting for API..."
 for i in {1..120}; do
-    if grep -q "listening on\|Listening on\|NeoxAgent listening" agent.log 2>/dev/null; then
+    if grep -q "listening on\|Listening on\|neoxagent listening" agent.log 2>/dev/null; then
         echo -e "${GREEN} Ready!${NC}"
         break
     fi
@@ -152,7 +152,7 @@ CMD_RES=$(api_call POST "/api/pods/$POD_ID/files/create-dir?path=/assets")
 echo "DEBUG CREATE DIR: $CMD_RES"
 
 # Write index.html to ROOT to fix 403 Forbidden
-HTML_CONTENT="<html><body style='background-color:#1a1a1a;color:#00ff00;text-align:center;font-family:monospace;display:flex;flex-direction:column;justify-content:center;height:100vh;'><h1>🚀 NeoxAgent Deployment Success!</h1><p>This file was uploaded via Phase 5 File Manager API.</p><p>Status: <strong>Active</strong></p></body></html>"
+HTML_CONTENT="<html><body style='background-color:#1a1a1a;color:#00ff00;text-align:center;font-family:monospace;display:flex;flex-direction:column;justify-content:center;height:100vh;'><h1>🚀 neoxagent Deployment Success!</h1><p>This file was uploaded via Phase 5 File Manager API.</p><p>Status: <strong>Active</strong></p></body></html>"
 # Use a temp file to avoid JSON escaping hell in bash
 echo "$HTML_CONTENT" > temp_index.html
 # Use jq to construct JSON safely
@@ -169,7 +169,7 @@ ls -laR /home/dani626/neox_servers/web-server
 echo -e "\n${YELLOW}[Verification] Checking Website on Port 9090...${NC}"
 sleep 2 # Wait for Nginx
 HTTP_RESPONSE=$(curl -s http://localhost:9090)
-if [[ "$HTTP_RESPONSE" == *"NeoxAgent"* ]]; then
+if [[ "$HTTP_RESPONSE" == *"neoxagent"* ]]; then
     echo -e "${GREEN}✅ SUCCESS! Server responded with custom content.${NC}"
 else
     echo -e "${RED}❌ FAILED. Response: $HTTP_RESPONSE${NC}"

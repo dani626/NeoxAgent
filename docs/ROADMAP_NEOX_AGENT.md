@@ -1,4 +1,4 @@
-# 🦀 NeoxAgent — Roadmap de Desarrollo
+# 🦀 neoxagent — Roadmap de Desarrollo
 
 > **Agente de nodo escrito en Rust con Podman Nativo**
 > Reemplazo ligero y seguro de Pterodactyl Wings para el panel Jexactyl Next.js
@@ -25,7 +25,7 @@
 ┌──────────┐   ┌──────────┐
 │  Nodo 1  │   │  Nodo 2  │   ...N nodos
 │──────────│   │──────────│
-│ NeoxAgent│   │ NeoxAgent│   (Rust Binary ~3MB, ~3-5MB RAM)
+│ neoxagent│   │ neoxagent│   (Rust Binary ~3MB, ~3-5MB RAM)
 │  (Rust)  │   │  (Rust)  │
 │    │     │   │    │     │
 │podman-api│   │podman-api│   (SDK Nativo de Podman)
@@ -105,7 +105,7 @@ Contenedor Minecraft
 ## 📦 Estructura del Proyecto Rust
 
 ```
-neox-agent/
+neoxagent/
 ├── Cargo.toml                  # Dependencias
 ├── config.toml                 # Configuración del nodo
 ├── src/
@@ -160,14 +160,14 @@ neox-agent/
 
 #### Paso 0.1 — Inicializar proyecto Rust
 ```bash
-cargo init neox-agent
-cd neox-agent
+cargo init neoxagent
+cd neoxagent
 ```
 
 #### Paso 0.2 — Agregar dependencias en `Cargo.toml`
 ```toml
 [package]
-name = "neox-agent"
+name = "neoxagent"
 version = "0.1.0"
 edition = "2021"
 
@@ -263,7 +263,7 @@ async fn main() {
 host = "0.0.0.0"
 port = 8443
 api_key = "tu-clave-secreta-super-larga-aqui"
-data_dir = "/var/lib/neox-agent"
+data_dir = "/var/lib/neoxagent"
 
 [podman]
 # Socket rootless (ajustar UID si es necesario)
@@ -655,7 +655,7 @@ spec:
 
 #### Paso 4.4 — Flujo Interno
 1. El panel envía el YAML al agente
-2. El agente guarda en `/var/lib/neox-agent/stacks/{nombre}/pod.yaml`
+2. El agente guarda en `/var/lib/neoxagent/stacks/{nombre}/pod.yaml`
 3. Ejecuta `podman play kube pod.yaml` (via API o CLI fallback)
 4. Retorna la lista de contenedores creados dentro del Pod
 5. Los labels `neox.*` permiten al agente identificar qué Pods gestiona
@@ -737,7 +737,7 @@ DELETE /api/pods/:id/backups/:backup_id          → Eliminar backup
 1. (Opcional) Detener el Pod para consistencia de datos
 2. Comprimir el directorio del volumen → `{timestamp}.tar.gz`
 3. Calcular checksum SHA256
-4. Guardar en `/var/lib/neox-agent/backups/{pod_id}/{timestamp}.tar.gz`
+4. Guardar en `/var/lib/neoxagent/backups/{pod_id}/{timestamp}.tar.gz`
 5. (Opcional) Reiniciar el Pod
 6. Responder con metadata:
 ```json
@@ -939,8 +939,8 @@ POST   /api/pod-servers/:id/backups  → Crear backup
 ```toml
 [tls]
 enabled = true
-cert_path = "/etc/neox-agent/cert.pem"
-key_path = "/etc/neox-agent/key.pem"
+cert_path = "/etc/neoxagent/cert.pem"
+key_path = "/etc/neoxagent/key.pem"
 ```
 - Usar Let's Encrypt con certbot
 - O self-signed para redes internas
@@ -960,10 +960,10 @@ key_path = "/etc/neox-agent/key.pem"
 
 #### Paso 9.4 — Systemd Service para el Agente
 ```ini
-# /etc/systemd/system/neox-agent.service
+# /etc/systemd/system/neoxagent.service
 # NOTA: Corre como usuario normal, NO como root
 [Unit]
-Description=NeoxAgent - Podman Management Agent
+Description=neoxagent - Podman Management Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -971,17 +971,17 @@ Wants=network-online.target
 Type=simple
 User=neox
 Group=neox
-ExecStart=/usr/local/bin/neox-agent
+ExecStart=/usr/local/bin/neoxagent
 Restart=always
 RestartSec=5
-WorkingDirectory=/var/lib/neox-agent
+WorkingDirectory=/var/lib/neoxagent
 Environment=RUST_LOG=info
 
 # Seguridad adicional de systemd
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/neox-agent /home/neox/servers
+ReadWritePaths=/var/lib/neoxagent /home/neox/servers
 
 [Install]
 WantedBy=multi-user.target
@@ -990,7 +990,7 @@ WantedBy=multi-user.target
 #### Paso 9.5 — Script de Instalación Automatizada
 ```bash
 #!/bin/bash
-# install.sh — Instalar NeoxAgent en un nodo nuevo
+# install.sh — Instalar neoxagent en un nodo nuevo
 # Uso: curl -sSL https://tudominio.com/install.sh | bash -s -- --api-key MI_CLAVE
 #
 # El script:
@@ -1000,7 +1000,7 @@ WantedBy=multi-user.target
 # 4. Habilita podman.socket
 # 5. Configura sysctl para puertos bajos
 # 6. Habilita linger para el usuario
-# 7. Descarga el binario neox-agent desde releases
+# 7. Descarga el binario neoxagent desde releases
 # 8. Genera config.toml con la API key proporcionada
 # 9. Instala el servicio systemd
 # 10. Inicia el agente

@@ -55,7 +55,7 @@ pub struct ResourceLimits {
     pub memory_mb: Option<u64>,
     /// CPU core limit (e.g. 2.0 for 2 cores)
     pub cpu_cores: Option<f64>,
-    /// Disk limit in megabytes (tracked by NeoxAgent, not enforced by Podman)
+    /// Disk limit in megabytes (tracked by neoxagent, not enforced by Podman)
     pub disk_mb: Option<u64>,
 }
 

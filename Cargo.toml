@@ -1,9 +1,9 @@
 [package]
-name = "neox-agent"
+name = "neoxagent"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight Podman management agent for Jexactyl panel"
-authors = ["NeoxHost"]
+authors = ["neoxhost"]
 
 [dependencies]
 # Podman (SDK Nativo)

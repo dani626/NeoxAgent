@@ -1,11 +1,11 @@
-//! # NeoxAgent
+//! # neoxagent
 //!
 //! Lightweight Podman management agent for the Jexactyl panel.
 //! Runs on each node and exposes a REST API to manage containers and pods.
 //!
 //! ## Architecture
 //! ```
-//! Panel (Next.js) → HTTPS/API Key → NeoxAgent (this) → podman.sock → Podman Engine
+//! Panel (Next.js) → HTTPS/API Key → neoxagent (this) → podman.sock → Podman Engine
 //! ```
 
 mod auth;
@@ -42,12 +42,12 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "neox_agent=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "neoxagent=info,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("🦀 NeoxAgent v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("🦀 neoxagent v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("   Lightweight Podman Management Agent");
     tracing::info!("   ──────────────────────────────────");
 
@@ -337,7 +337,7 @@ async fn main() {
         .with_state(state);
 
     tracing::info!("──────────────────────────────────────────");
-    tracing::info!("🚀 NeoxAgent listening on {}", bind_addr);
+    tracing::info!("🚀 neoxagent listening on {}", bind_addr);
     tracing::info!("   Phase 1: API REST Base       — Active");
     tracing::info!("   Phase 2: Real-time (WS)      — Active");
     tracing::info!("   Phase 3: Pods + Tun2socks    — Active");

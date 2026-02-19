@@ -3,7 +3,7 @@ v1.0.4
 En línea: 1 Carácter: 1
 + cargo build 2>&1 | 
 Out-File -FilePath C:\proyect
-os\NeoxAgent\build_ou ...
+os\neoxagent\build_ou ...
 + ~~~~~~~~~~~~~~~~
     + CategoryInfo           
    : NotSpecified: (   Comp  
@@ -243,9 +243,9 @@ v0.1.20
 v0.8.0
    Compiling podman-api 
 v0.10.0
-   Compiling neox-agent 
+   Compiling neoxagent 
 v0.1.0 
-(C:\proyectos\NeoxAgent)
+(C:\proyectos\neoxagent)
     Finished `dev` profile 
 [unoptimized + debuginfo] 
 target(s) in 25.40s

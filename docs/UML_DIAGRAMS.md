@@ -1,6 +1,6 @@
-# NeoxAgent — Diagramas UML
+# neoxagent — Diagramas UML
 
-> Documentación UML completa de la arquitectura del NeoxAgent.
+> Documentación UML completa de la arquitectura del neoxagent.
 > Todos los diagramas están en formato [Mermaid](https://mermaid.js.org/) para renderizado directo en GitHub/GitLab/VS Code.
 >
 > Generado: 2026-02-18
@@ -37,7 +37,7 @@ graph TB
         PANEL[🖥️ Jexactyl Panel]
     end
 
-    subgraph "NeoxAgent (Este Binario)"
+    subgraph "neoxagent (Este Binario)"
         direction TB
         ROUTER[🔀 Axum Router]
         AUTH[🔒 Auth Middleware<br/>Bearer Token]
