@@ -113,6 +113,17 @@ pub async fn create_container(
     // Labels — always add neox.managed = true
     let mut labels = req.labels.clone();
     labels.entry("neox.managed".to_string()).or_insert_with(|| "true".to_string());
+    
+    // Store network speed and disk limits in labels so we can retrieve them later
+    if let Some(ref limits) = req.limits {
+        if let Some(speed) = limits.network_speed_mbps {
+            labels.insert("neox.network.speed_mbps".to_string(), speed.to_string());
+        }
+        if let Some(disk) = limits.disk_mb {
+            labels.insert("neox.disk_mb".to_string(), disk.to_string());
+        }
+    }
+    
     builder = builder.labels(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     // DNS servers from config defaults
@@ -158,7 +169,7 @@ pub async fn create_container(
         name: req.name,
         image: req.image,
         status: "created".to_string(),
-        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        created_at: Some(crate::time_utils::now_rfc3339()),
         ports,
         limits,
         labels,
@@ -251,21 +262,31 @@ pub async fn inspect_container(
         .filter(|&c| c > 0)
         .map(|c| c as f64 / 1_000_000_000.0);
 
-    let limits = if memory_limit.is_some() || cpu_cores.is_some() {
-        Some(ResourceLimits {
-            memory_mb: memory_limit,
-            cpu_cores,
-            disk_mb: None,
-        })
-    } else {
-        None
-    };
-
     let labels = inspect
         .config
         .as_ref()
         .and_then(|c| c.labels.clone())
         .unwrap_or_default();
+
+    // Extract network and disk limits from labels
+    let network_speed_mbps = labels
+        .get("neox.network.speed_mbps")
+        .and_then(|v| v.parse::<u64>().ok());
+    
+    let disk_mb = labels
+        .get("neox.disk_mb")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let limits = if memory_limit.is_some() || cpu_cores.is_some() || network_speed_mbps.is_some() || disk_mb.is_some() {
+        Some(ResourceLimits {
+            memory_mb: memory_limit,
+            cpu_cores,
+            disk_mb,
+            network_speed_mbps,
+        })
+    } else {
+        None
+    };
 
     Ok(ContainerResponse {
         id: inspect.id.unwrap_or_default(),
@@ -342,6 +363,38 @@ pub async fn start_container(
         .start(None)
         .await
         .map_err(|e| AppError::Podman(format!("Failed to start container '{}': {}", id, e)))?;
+        
+    // Apply network limit if present
+    if let Ok(inspect) = inspect_container(state, id).await {
+        if let Some(limits) = inspect.limits {
+            if let Some(speed) = limits.network_speed_mbps {
+                if speed > 0 {
+                    // Try to get PID and apply tc
+                    if let Ok(raw_inspect) = container.inspect().await {
+                        if let Some(c_state) = raw_inspect.state {
+                            if let Some(pid) = c_state.pid {
+                                if pid > 0 {
+                                    // Apply tc via nsenter
+                                    // We use `replace` instead of `add` so it works even if already applied
+                                    let _ = std::process::Command::new("nsenter")
+                                        .args(&[
+                                            "-t", &pid.to_string(),
+                                            "-n",
+                                            "tc", "qdisc", "replace", "dev", "eth0", "root", "tbf",
+                                            "rate", &format!("{}mbit", speed),
+                                            "burst", "32kbit",
+                                            "latency", "400ms"
+                                        ])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+        
     Ok(())
 }
 

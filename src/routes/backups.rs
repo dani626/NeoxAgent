@@ -204,10 +204,10 @@ pub async fn create_backup(
 
     // Generate backup metadata
     let backup_id = uuid::Uuid::new_v4().to_string();
-    let timestamp = chrono::Utc::now();
+    let timestamp = crate::time_utils::Timestamp::now();
     let filename = format!(
         "{}.tar.gz",
-        timestamp.format("%Y%m%d_%H%M%S")
+        timestamp.to_filename()
     );
     let archive_path = backups_path.join(&filename);
 

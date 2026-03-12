@@ -14,6 +14,7 @@ mod error;
 mod models;
 mod routes;
 mod services;
+mod time_utils;
 
 use std::sync::Arc;
 
@@ -416,18 +417,58 @@ async fn main() {
     tracing::info!("     GET    /api/pods/{{id}}/systemd/status");
     tracing::info!("──────────────────────────────────────────");
 
-    // Start server
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
+    // Start server (with or without TLS)
+    if state.config.tls.enabled {
+        let cert_path = &state.config.tls.cert_path;
+        let key_path = &state.config.tls.key_path;
+
+        if cert_path.is_empty() || key_path.is_empty() {
+            tracing::error!("❌ TLS enabled but cert_path or key_path is empty in config.toml");
+            std::process::exit(1);
+        }
+
+        tracing::info!("🔒 TLS enabled (native rustls)");
+        tracing::info!("   Cert: {}", cert_path);
+        tracing::info!("   Key:  {}", key_path);
+
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            cert_path,
+            key_path,
+        )
         .await
         .unwrap_or_else(|e| {
-            tracing::error!("Failed to bind to {}: {}", bind_addr, e);
+            tracing::error!("❌ Failed to load TLS certificates: {}", e);
+            tracing::error!("   Make sure the cert and key files exist and are valid PEM format.");
             std::process::exit(1);
         });
 
-    axum::serve(listener, app)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Server error: {}", e);
+        let addr: std::net::SocketAddr = bind_addr.parse().unwrap_or_else(|e| {
+            tracing::error!("Failed to parse bind address '{}': {}", bind_addr, e);
             std::process::exit(1);
         });
+
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("TLS Server error: {}", e);
+                std::process::exit(1);
+            });
+    } else {
+        tracing::info!("🔓 TLS disabled (plain HTTP)");
+
+        let listener = tokio::net::TcpListener::bind(&bind_addr)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to bind to {}: {}", bind_addr, e);
+                std::process::exit(1);
+            });
+
+        axum::serve(listener, app)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Server error: {}", e);
+                std::process::exit(1);
+            });
+    }
 }

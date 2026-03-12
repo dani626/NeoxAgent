@@ -57,6 +57,8 @@ pub struct ResourceLimits {
     pub cpu_cores: Option<f64>,
     /// Disk limit in megabytes (tracked by neoxagent, not enforced by Podman)
     pub disk_mb: Option<u64>,
+    /// Network speed limit in megabits per second (enforced via tc)
+    pub network_speed_mbps: Option<u64>,
 }
 
 /// Volume mount configuration

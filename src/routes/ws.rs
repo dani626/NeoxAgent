@@ -619,7 +619,7 @@ fn format_stats_response(
         json!({
             "type": "stats",
             "container_id": container_id,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "timestamp": crate::time_utils::now_rfc3339(),
             "cpu_percent": (cpu_percent * 100.0).round() / 100.0,
             "memory_used_mb": mem_usage_mb,
             "memory_limit_mb": mem_limit_mb,
@@ -639,7 +639,7 @@ fn format_stats_response(
         json!({
             "type": "stats",
             "container_id": container_id,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "timestamp": crate::time_utils::now_rfc3339(),
             "raw": stats_response,
         })
     }
