@@ -531,21 +531,10 @@ CONTAINERS
 
 log_step "Podman event logger → file (saves ~10MB RAM)"
 
-# 2. Storage config: optimal overlay driver
-if [ ! -f /etc/containers/storage.conf ]; then
-    cat > /etc/containers/storage.conf <<'STORAGE'
-[storage]
-driver = "overlay"
-
-[storage.options]
-# Use native diff for lower CPU usage
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-mountopt = "nodev"
-STORAGE
-    log_step "Podman storage → overlay with native-diff"
-else
-    log_step "Storage config exists (keeping existing)"
+# 2. Delete existing invalid storage configs to avoid 'runroot must be set' errors in Podman 5.0+
+if [ -f /etc/containers/storage.conf ]; then
+    rm -f /etc/containers/storage.conf
+    log_step "Removed legacy storage config to use Podman default"
 fi
 
 # 3. Disable Podman auto-update (uses RAM for no benefit here)
