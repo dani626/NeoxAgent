@@ -18,7 +18,7 @@ set -e
 # ═══════════════════════════════════════════════════════════════════
 
 # ─── Configuration ──────────────────────────────────────────────────
-REPO_URL="${NEOX_REPO:-https://github.com/dani626/NeoxAgent.git}"
+REPO_URL="${NEOX_REPO:-https://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@github.com/dani626/NeoxAgent.git}"
 BRANCH="${NEOX_BRANCH:-main}"
 DOMAIN="${NEOX_DOMAIN:-}"           # If set, enables SSL with Let's Encrypt
 EMAIL="${NEOX_EMAIL:-}"             # Email for Let's Encrypt (optional)
