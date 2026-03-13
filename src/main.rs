@@ -335,7 +335,7 @@ async fn main() {
                 .allow_headers(Any),
         )
         // ─── Shared state ───────────────────────────────────────────
-        .with_state(state);
+        .with_state(state.clone());
 
     tracing::info!("──────────────────────────────────────────");
     tracing::info!("🚀 neoxagent listening on {}", bind_addr);
