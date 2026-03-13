@@ -125,6 +125,11 @@ if [ "$TOTAL_RAM" -le 2048 ]; then
     modprobe zram num_devices=1 2>/dev/null || true
 
     if [ -e /sys/block/zram0 ]; then
+        # Check if already in use and disable it before reset
+        if grep -q "/dev/zram0" /proc/swaps; then
+            swapoff /dev/zram0 2>/dev/null || true
+        fi
+        
         # Reset if already configured
         echo 1 > /sys/block/zram0/reset 2>/dev/null || true
 
