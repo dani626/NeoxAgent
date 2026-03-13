@@ -398,9 +398,6 @@ fi
 
 if [ -f "$CONFIG_DEST" ]; then
     log_warn "Config already exists (keeping existing)"
-elif [ -f "$SOURCE_DIR/config.toml" ] && [ "$TLS_ENABLED" = "false" ]; then
-    install -m 644 "$SOURCE_DIR/config.toml" "$CONFIG_DEST"
-    log_step "Config copied from source"
 else
     API_KEY=$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | base64 | tr -d '/+=' | head -c 64)
 
