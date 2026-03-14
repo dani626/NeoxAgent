@@ -282,7 +282,7 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-#  STEP 6: Compile hev-socks5-tproxy
+#  STEP 6: Compile hev-socks5-tproxy & Build Sidecar Image
 # ═══════════════════════════════════════════════════════════════════
 log_section "hev-socks5-tproxy (SOCKS5 Transparent Proxy with Auth)"
 
@@ -298,6 +298,25 @@ rm -rf "$HEV_TPROXY_DIR"
 cd "$SOURCE_DIR"
 
 command -v hev-socks5-tproxy &>/dev/null && log_step "hev-socks5-tproxy installed" || log_warn "hev-socks5-tproxy may have failed"
+
+# Build pre-baked sidecar image with iptables + iproute2
+# This avoids downloading ~30MB of packages every time a proxied pod starts
+log_info "Building neox-tproxy-sidecar image (pre-baked iptables + iproute2)..."
+
+SIDECAR_DOCKERFILE=$(mktemp)
+cat > "$SIDECAR_DOCKERFILE" <<'SIDECAR_DF'
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update -qq && \
+    apt-get install -yq --no-install-recommends iptables iproute2 ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+SIDECAR_DF
+
+if podman build -t neox-tproxy-sidecar:latest -f "$SIDECAR_DOCKERFILE" . 2>/dev/null; then
+    log_step "neox-tproxy-sidecar image built (iptables + iproute2 pre-installed)"
+else
+    log_warn "Failed to build sidecar image, will fall back to runtime install"
+fi
+rm -f "$SIDECAR_DOCKERFILE"
 
 # ═══════════════════════════════════════════════════════════════════
 #  STEP 7: SSL Certificates (if domain provided)
@@ -590,6 +609,7 @@ else
 fi
 
 command -v hev-socks5-tproxy &>/dev/null && log_step "hev-socks5-tproxy → OK" || log_warn "hev-socks5-tproxy → missing"
+podman image exists neox-tproxy-sidecar:latest 2>/dev/null && log_step "neox-tproxy-sidecar image → OK" || log_warn "neox-tproxy-sidecar image → missing (will use runtime install)"
 command -v tc &>/dev/null && log_step "tc → OK" || log_warn "tc → missing"
 
 PODMAN_VER=$(podman --version 2>/dev/null | awk '{print $3}' || echo "?")
@@ -616,9 +636,10 @@ fi
 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${BOLD}  Components:${NC}"
-echo "    neoxagent      $INSTALL_DIR/neoxagent"
-echo "    hev-socks5-tproxy  /usr/local/bin/hev-socks5-tproxy"
-echo "    Config         $CONFIG_DEST"
+echo "    neoxagent           $INSTALL_DIR/neoxagent"
+echo "    hev-socks5-tproxy   /usr/local/bin/hev-socks5-tproxy"
+echo "    tproxy-sidecar      neox-tproxy-sidecar:latest (Podman image)"
+echo "    Config              $CONFIG_DEST"
 echo ""
 echo -e "${BOLD}  Network:${NC}"
 if [ "$TLS_ENABLED" = "true" ]; then

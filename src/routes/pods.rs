@@ -141,7 +141,7 @@ pub async fn create_pod(
             };
 
             let proxy_image = proxy.image.as_deref()
-                .unwrap_or("docker.io/library/debian:bookworm-slim");
+                .unwrap_or("localhost/neox-tproxy-sidecar:latest");
 
             let log_level = proxy.loglevel.as_deref().unwrap_or("warn");
 
@@ -169,8 +169,10 @@ pub async fn create_pod(
             let script = format!(r#"
 set -e
 
-# Install iptables and iproute2 for TPROXY
-apt-get update -qq && apt-get install -yq iptables iproute2 >/dev/null 2>&1
+# Install iptables and iproute2 if not already present (pre-baked image has them)
+if ! command -v iptables >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
+fi
 
 # Write hev-socks5-tproxy config
 mkdir -p /etc/hev
@@ -187,14 +189,14 @@ socks5:
 
 tcp:
   port: 1088
-  address: '::'
+  address: '0.0.0.0'
 
 udp:
   port: 1088
-  address: '::'
+  address: '0.0.0.0'
 
 misc:
-  task-stack-size: 65536
+  task-stack-size: 131072
   connect-timeout: 5000
   tcp-read-write-timeout: 300000
   udp-read-write-timeout: 60000
@@ -225,6 +227,10 @@ iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
 # Skip traffic to the SOCKS5 server itself
 iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
 
+# Skip DNS (port 53) — let DNS resolve via normal network
+iptables -t mangle -A HEV_TPROXY -p udp --dport 53 -j RETURN
+iptables -t mangle -A HEV_TPROXY -p tcp --dport 53 -j RETURN
+
 # TPROXY: redirect TCP+UDP to hev-socks5-tproxy on port 1088
 iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
 iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
@@ -245,6 +251,9 @@ iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
+# Skip DNS (port 53)
+iptables -t mangle -A HEV_OUTPUT -p udp --dport 53 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p tcp --dport 53 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
 iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
 iptables -t mangle -A OUTPUT -j HEV_OUTPUT
