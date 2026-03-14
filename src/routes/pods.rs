@@ -194,7 +194,7 @@ udp:
   address: '::'
 
 misc:
-  task-stack-size: 16384
+  task-stack-size: 65536
   connect-timeout: 5000
   tcp-read-write-timeout: 300000
   udp-read-write-timeout: 60000
