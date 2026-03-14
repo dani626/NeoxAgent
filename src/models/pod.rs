@@ -28,24 +28,26 @@ pub struct CreatePodRequest {
     pub network: Option<String>,
 }
 
-/// Configuration for a tun2socks proxy sidecar
+/// Configuration for the hev-socks5-tproxy proxy sidecar.
+/// Uses TPROXY (no TUN) for transparent proxying with SOCKS5 authentication support.
 #[derive(Debug, Deserialize)]
 pub struct ProxyConfig {
     /// Whether the proxy is enabled
     pub enabled: bool,
-    /// Proxy type (currently only "tun2socks" supported)
+    /// Proxy type ("hev-socks5-tproxy")
     #[serde(rename = "type")]
     pub proxy_type: Option<String>,
-    /// Container image for the proxy
+    /// Container image for the proxy sidecar
     pub image: Option<String>,
     /// SOCKS5 proxy URL (e.g. "socks5://user:pass@proxy.com:1080")
+    /// Supports authentication: username and password are parsed from the URL.
     pub socks5_url: Option<String>,
     /// DNS server to use inside the proxy (default: "1.1.1.1")
     pub dns: Option<String>,
     /// Additional environment variables for the proxy container
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Log level for tun2socks (default: "info")
+    /// Log level for hev-socks5-tproxy (default: "warn")
     pub loglevel: Option<String>,
 }
 

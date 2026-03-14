@@ -108,7 +108,7 @@ pub async fn create_pod(
     let pod_id = pod.id().to_string();
     tracing::info!("✅ Pod '{}' created: {}", req.name, pod_id);
 
-    // Step 2: If proxy is enabled, create ipt2socks sidecar container
+    // Step 2: If proxy is enabled, create hev-socks5-tproxy sidecar container
     let proxy_enabled = req.proxy.as_ref().map_or(false, |p| p.enabled);
 
     if proxy_enabled {
@@ -116,52 +116,156 @@ pub async fn create_pod(
             let socks5_url = proxy.socks5_url.as_deref()
                 .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
 
-            let mut url_str = socks5_url.trim_start_matches("socks5://");
-            // Ignore auth if provided since ipt2socks does not support it
-            if let Some((_, rest)) = url_str.split_once('@') {
-                url_str = rest;
-            }
-            
-            let (proxy_host, proxy_port) = match url_str.split_once(':') {
+            // Parse socks5://[user:pass@]host:port
+            let url_str = socks5_url.trim_start_matches("socks5://");
+
+            let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
+                (Some(auth), rest)
+            } else {
+                (None, url_str)
+            };
+
+            let (proxy_host, proxy_port) = match host_part.split_once(':') {
                 Some((h, p)) => (h, p),
-                None => (url_str, "1080")
+                None => (host_part, "1080")
+            };
+
+            // Parse username:password if present
+            let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
+                match auth.split_once(':') {
+                    Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
+                    None => (Some(auth.to_string()), None),
+                }
+            } else {
+                (None, None)
             };
 
             let proxy_image = proxy.image.as_deref()
                 .unwrap_or("docker.io/library/debian:bookworm-slim");
 
-            let sidecar_name = format!("{}-ipt2socks", req.name);
+            let log_level = proxy.loglevel.as_deref().unwrap_or("warn");
 
-            tracing::info!("🔌 Creating ipt2socks sidecar '{}' to {}", sidecar_name, url_str);
+            let sidecar_name = format!("{}-hev-tproxy", req.name);
 
+            tracing::info!(
+                "🔌 Creating hev-socks5-tproxy sidecar '{}' → {}:{} (auth: {})",
+                sidecar_name, proxy_host, proxy_port,
+                if proxy_user.is_some() { "yes" } else { "no" }
+            );
+
+            // Build auth YAML lines if credentials are provided
+            let auth_yaml = match (&proxy_user, &proxy_pass) {
+                (Some(user), Some(pass)) => format!(
+                    "  username: '{}'\n  password: '{}'",
+                    user, pass
+                ),
+                _ => String::new(),
+            };
+
+            // Build the startup script that:
+            // 1. Writes a hev-socks5-tproxy YAML config
+            // 2. Sets up iptables TPROXY rules
+            // 3. Execs hev-socks5-tproxy
             let script = format!(r#"
-apt-get update -qq && apt-get install -yq iptables
-iptables -t nat -N PT2SOCKS
-iptables -t nat -A PT2SOCKS -d 0.0.0.0/8 -j RETURN
-iptables -t nat -A PT2SOCKS -d 10.0.0.0/8 -j RETURN
-iptables -t nat -A PT2SOCKS -d 127.0.0.0/8 -j RETURN
-iptables -t nat -A PT2SOCKS -d 169.254.0.0/16 -j RETURN
-iptables -t nat -A PT2SOCKS -d 172.16.0.0/12 -j RETURN
-iptables -t nat -A PT2SOCKS -d 192.168.0.0/16 -j RETURN
-iptables -t nat -A PT2SOCKS -d 224.0.0.0/4 -j RETURN
-iptables -t nat -A PT2SOCKS -d 240.0.0.0/4 -j RETURN
-iptables -t nat -A PT2SOCKS -d {proxy_host} -j RETURN
-iptables -t nat -A PT2SOCKS -p tcp -j REDIRECT --to-ports 15000
-iptables -t nat -A OUTPUT -p tcp -j PT2SOCKS
+set -e
 
-echo "Starting ipt2socks -> {proxy_host}:{proxy_port}"
-exec /usr/local/bin/ipt2socks -R -s {proxy_host} -p {proxy_port} -b 0.0.0.0 -l 15000
+# Install iptables and iproute2 for TPROXY
+apt-get update -qq && apt-get install -yq iptables iproute2 >/dev/null 2>&1
+
+# Write hev-socks5-tproxy config
+mkdir -p /etc/hev
+cat > /etc/hev/tproxy.yml << 'HEVEOF'
+main:
+  workers: 1
+
+socks5:
+  port: {proxy_port}
+  address: '{proxy_host}'
+  udp: 'udp'
+  mark: 438
+{auth_yaml}
+
+tcp:
+  port: 1088
+  address: '::'
+
+udp:
+  port: 1088
+  address: '::'
+
+misc:
+  task-stack-size: 16384
+  connect-timeout: 5000
+  tcp-read-write-timeout: 300000
+  udp-read-write-timeout: 60000
+  log-file: stderr
+  log-level: {log_level}
+HEVEOF
+
+# Setup TPROXY iptables rules (mangle table, not NAT)
+# Mark 0x438 = 1080 (used by hev to skip its own traffic)
+# Mark 0x440 = 1088 (tproxy mark for routing)
+
+iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
+iptables -t mangle -F HEV_TPROXY
+
+# Skip hev-socks5-tproxy's own outgoing traffic (marked 0x438)
+iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
+
+# Skip private/reserved networks
+iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
+
+# Skip traffic to the SOCKS5 server itself
+iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
+
+# TPROXY: redirect TCP+UDP to hev-socks5-tproxy on port 1088
+iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+
+# Apply to PREROUTING (for other containers in this pod)
+iptables -t mangle -A PREROUTING -j HEV_TPROXY
+
+# Apply to OUTPUT (for local traffic in this container)
+iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
+iptables -t mangle -F HEV_OUTPUT
+iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
+iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
+iptables -t mangle -A OUTPUT -j HEV_OUTPUT
+
+# Setup policy routing for TPROXY
+ip rule add fwmark 0x440 table 100 2>/dev/null || true
+ip route add local default dev lo table 100 2>/dev/null || true
+
+echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
+exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
 "#);
 
             let sidecar_opts = ContainerCreateOpts::builder()
                 .name(&sidecar_name)
                 .image(proxy_image)
                 .pod(req.name.as_str())
-                .privileged(true) // Required for iptables (NET_ADMIN)
+                .privileged(true) // Required for iptables + TPROXY (NET_ADMIN)
                 .mounts(vec![
                     ContainerMount {
-                        destination: Some("/usr/local/bin/ipt2socks".to_string()),
-                        source: Some("/usr/local/bin/ipt2socks".to_string()),
+                        destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+                        source: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
                         _type: Some("bind".to_string()),
                         options: Some(vec!["ro".to_string()]),
                         uid_mappings: None,
@@ -171,7 +275,7 @@ exec /usr/local/bin/ipt2socks -R -s {proxy_host} -p {proxy_port} -b 0.0.0.0 -l 1
                 .command(["sh", "-c", &script])
                 .labels([
                     ("neox.role", "proxy-sidecar"),
-                    ("neox.proxy.type", "ipt2socks"),
+                    ("neox.proxy.type", "hev-socks5-tproxy"),
                     ("neox.pod", req.name.as_str()),
                 ])
                 .build();
@@ -180,10 +284,10 @@ exec /usr/local/bin/ipt2socks -R -s {proxy_host} -p {proxy_port} -b 0.0.0.0 -l 1
                 .create(&sidecar_opts)
                 .await
                 .map_err(|e| AppError::Podman(format!(
-                    "Failed to create ipt2socks sidecar '{}': {}", sidecar_name, e
+                    "Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e
                 )))?;
 
-            tracing::info!("✅ ipt2socks sidecar '{}' created", sidecar_name);
+            tracing::info!("✅ hev-socks5-tproxy sidecar '{}' created", sidecar_name);
         }
     }
 
@@ -309,11 +413,12 @@ pub async fn get_pod(
         .await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
 
-    // Detect if proxy is enabled by checking container names for tun2socks pattern
+    // Detect if proxy is enabled by checking container names for proxy sidecar pattern
     let proxy_enabled = inspect.containers.as_ref()
         .map(|ctrs| {
             ctrs.iter().any(|c| {
-                c.name.as_deref().unwrap_or("").contains("tun2socks")
+                let name = c.name.as_deref().unwrap_or("");
+                name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks")
             })
         })
         .unwrap_or(false);
