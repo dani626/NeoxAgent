@@ -108,7 +108,7 @@ pub async fn create_pod(
     let pod_id = pod.id().to_string();
     tracing::info!("✅ Pod '{}' created: {}", req.name, pod_id);
 
-    // Step 2: If proxy is enabled, create tun2socks sidecar container
+    // Step 2: If proxy is enabled, create ipt2socks sidecar container
     let proxy_enabled = req.proxy.as_ref().map_or(false, |p| p.enabled);
 
     if proxy_enabled {
@@ -116,35 +116,62 @@ pub async fn create_pod(
             let socks5_url = proxy.socks5_url.as_deref()
                 .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
 
-            let proxy_image = proxy.image.as_deref()
-                .unwrap_or("docker.io/xjasonlyu/tun2socks:latest");
-            let proxy_dns = proxy.dns.as_deref().unwrap_or("1.1.1.1");
-            let loglevel = proxy.loglevel.as_deref().unwrap_or("info");
-
-            let sidecar_name = format!("{}-tun2socks", req.name);
-
-            tracing::info!("🔌 Creating tun2socks sidecar '{}'", sidecar_name);
-
-            // Build environment for tun2socks
-            let mut tun_env: HashMap<&str, &str> = HashMap::new();
-            tun_env.insert("PROXY", socks5_url);
-            tun_env.insert("LOGLEVEL", loglevel);
-            tun_env.insert("TUN_DNS", proxy_dns);
-
-            // Also include any extra env from the proxy config
-            for (k, v) in &proxy.env {
-                tun_env.insert(k.as_str(), v.as_str());
+            let mut url_str = socks5_url.trim_start_matches("socks5://");
+            // Ignore auth if provided since ipt2socks does not support it
+            if let Some((_, rest)) = url_str.split_once('@') {
+                url_str = rest;
             }
+            
+            let (proxy_host, proxy_port) = match url_str.split_once(':') {
+                Some((h, p)) => (h, p),
+                None => (url_str, "1080")
+            };
+
+            let proxy_image = proxy.image.as_deref()
+                .unwrap_or("docker.io/library/debian:bookworm-slim");
+
+            let sidecar_name = format!("{}-ipt2socks", req.name);
+
+            tracing::info!("🔌 Creating ipt2socks sidecar '{}' to {}", sidecar_name, url_str);
+
+            let script = format!(r#"
+apt-get update -qq && apt-get install -yq iptables
+iptables -t nat -N PT2SOCKS
+iptables -t nat -A PT2SOCKS -d 0.0.0.0/8 -j RETURN
+iptables -t nat -A PT2SOCKS -d 10.0.0.0/8 -j RETURN
+iptables -t nat -A PT2SOCKS -d 127.0.0.0/8 -j RETURN
+iptables -t nat -A PT2SOCKS -d 169.254.0.0/16 -j RETURN
+iptables -t nat -A PT2SOCKS -d 172.16.0.0/12 -j RETURN
+iptables -t nat -A PT2SOCKS -d 192.168.0.0/16 -j RETURN
+iptables -t nat -A PT2SOCKS -d 224.0.0.0/4 -j RETURN
+iptables -t nat -A PT2SOCKS -d 240.0.0.0/4 -j RETURN
+iptables -t nat -A PT2SOCKS -d {proxy_host} -j RETURN
+iptables -t nat -A PT2SOCKS -p tcp -j REDIRECT --to-ports 15000
+iptables -t nat -A OUTPUT -p tcp -j PT2SOCKS
+
+echo "Starting ipt2socks -> {proxy_host}:{proxy_port}"
+exec /usr/local/bin/ipt2socks -R -s {proxy_host} -p {proxy_port} -b 0.0.0.0 -l 15000
+"#);
 
             let sidecar_opts = ContainerCreateOpts::builder()
                 .name(&sidecar_name)
                 .image(proxy_image)
-                .env(tun_env)
                 .pod(req.name.as_str())
-                .privileged(true) // tun2socks needs NET_ADMIN + TUN device
+                .privileged(true) // Required for iptables (NET_ADMIN)
+                .mounts(vec![
+                    ContainerMount {
+                        destination: Some("/usr/local/bin/ipt2socks".to_string()),
+                        source: Some("/usr/local/bin/ipt2socks".to_string()),
+                        _type: Some("bind".to_string()),
+                        options: Some(vec!["ro".to_string()]),
+                        uid_mappings: None,
+                        gid_mappings: None,
+                    }
+                ])
+                .command(["sh", "-c", &script])
                 .labels([
                     ("neox.role", "proxy-sidecar"),
-                    ("neox.proxy.type", "tun2socks"),
+                    ("neox.proxy.type", "ipt2socks"),
                     ("neox.pod", req.name.as_str()),
                 ])
                 .build();
@@ -153,10 +180,10 @@ pub async fn create_pod(
                 .create(&sidecar_opts)
                 .await
                 .map_err(|e| AppError::Podman(format!(
-                    "Failed to create tun2socks sidecar '{}': {}", sidecar_name, e
+                    "Failed to create ipt2socks sidecar '{}': {}", sidecar_name, e
                 )))?;
 
-            tracing::info!("✅ Tun2socks sidecar '{}' created", sidecar_name);
+            tracing::info!("✅ ipt2socks sidecar '{}' created", sidecar_name);
         }
     }
 
