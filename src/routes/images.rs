@@ -306,20 +306,14 @@ async fn handle_pull_stream(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("✅ [WS] Image pull stream complete: {}", image_ref);
 }
 
-// ─── GET /api/images/inspect — Inspect Image ─────────────────────────────
+// ─── GET /api/images/:id/inspect — Inspect Image ─────────────────────────────
 
-#[derive(serde::Deserialize)]
-pub struct InspectQuery {
-    pub id: String,
-}
-
-/// GET /api/images/inspect?id=...
+/// GET /api/images/:id/inspect
 /// Returns detailed metadata about an image.
 pub async fn inspect_image(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<InspectQuery>,
+    Path(image_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let image_id = query.id;
     tracing::info!("🔍 Inspecting image: {}", image_id);
 
     let image = state.podman.images().get(&image_id);

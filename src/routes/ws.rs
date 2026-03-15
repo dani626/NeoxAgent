@@ -647,7 +647,6 @@ fn format_stats_response(
 
 // ─── WebSocket: Pod Log Streaming ───────────────────────────────────────────
 
-/*
 /// WS /api/pods/:id/logs/stream
 pub async fn ws_pod_logs_stream(
     ws: WebSocketUpgrade,
@@ -736,4 +735,3 @@ async fn handle_pod_logs_stream(
         }
     }
 }
-*/
