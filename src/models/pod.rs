@@ -78,6 +78,8 @@ pub struct PodContainerSpec {
     /// Command override
     #[serde(default)]
     pub command: Vec<String>,
+    /// Entrypoint override
+    pub entrypoint: Option<Vec<String>>,
 }
 
 /// Request body for adding a container to an existing pod.

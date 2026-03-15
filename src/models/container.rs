@@ -30,6 +30,11 @@ pub struct CreateContainerRequest {
     /// Labels to apply
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Command override
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Entrypoint override
+    pub entrypoint: Option<Vec<String>>,
 }
 
 /// Port mapping configuration

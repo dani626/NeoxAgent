@@ -147,6 +147,18 @@ pub async fn create_container(
     };
     builder = builder.restart_policy(restart_policy);
 
+    // Command override
+    if !req.command.is_empty() {
+        builder = builder.command(req.command.iter().map(|s| s.as_str()));
+    }
+
+    // Entrypoint override
+    if let Some(ref entrypoint) = req.entrypoint {
+        if !entrypoint.is_empty() {
+            builder = builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+        }
+    }
+
     // Build and create
     let opts = builder.build();
     let container = state

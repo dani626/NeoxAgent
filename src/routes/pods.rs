@@ -380,6 +380,13 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
         }
 
+        // Apply entrypoint override
+        if let Some(ref entrypoint) = ctr_spec.entrypoint {
+            if !entrypoint.is_empty() {
+                ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+            }
+        }
+
         let ctr_opts = ctr_builder.build();
 
         state.podman.containers()
@@ -621,6 +628,13 @@ pub async fn add_container_to_pod(
     // Command override
     if !ctr.command.is_empty() {
         ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
+    }
+
+    // Entrypoint override
+    if let Some(ref entrypoint) = ctr.entrypoint {
+        if !entrypoint.is_empty() {
+            ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+        }
     }
 
     let ctr_opts = ctr_builder.build();
