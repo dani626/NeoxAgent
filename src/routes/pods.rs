@@ -312,7 +312,7 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             )));
         }
 
-        let ctr_name = format!("{}-{}", req.name, ctr_spec.name);
+        let ctr_name = ctr_spec.name.clone();
         tracing::info!("📦 Creating container '{}' in pod '{}'", ctr_name, req.name);
 
         let env_refs: HashMap<&str, &str> = ctr_spec.env.iter()
@@ -593,7 +593,7 @@ pub async fn add_container_to_pod(
         return Err(AppError::BadRequest("Image is required".into()));
     }
 
-    let ctr_name = format!("{}-{}", id, ctr.name);
+    let ctr_name = ctr.name.clone();
     tracing::info!("📦 Adding container '{}' to pod '{}'", ctr_name, id);
 
     let env_refs: HashMap<&str, &str> = ctr.env.iter()
