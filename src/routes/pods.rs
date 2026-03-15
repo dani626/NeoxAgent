@@ -393,7 +393,7 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
         let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
         let ctr_opts = ctr_builder.name(&temp_name).build();
 
-        state.podman.containers()
+        let created = state.podman.containers()
             .create(&ctr_opts)
             .await
             .map_err(|e| AppError::Podman(format!(
