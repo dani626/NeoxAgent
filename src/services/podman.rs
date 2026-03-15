@@ -162,13 +162,25 @@ pub async fn create_container(
     }
 
     // Build and create
-    let opts = builder.build();
+    // Build and create with a temporary name
+    let temp_name = format!("{}-tmp-{}", req.name, uuid::Uuid::new_v4().to_string()[..8].to_string());
+    let opts = builder.name(&temp_name).build();
+    
     let container = state
         .podman
         .containers()
         .create(&opts)
         .await
         .map_err(|e| AppError::Podman(format!("Failed to create container: {}", e)))?;
+
+    // Rename to final format: name-short_id
+    let short_id = &container.id[..12];
+    let final_name = format!("{}-{}", req.name, short_id);
+    
+    tracing::info!("🏷️ Renaming container {} to {}", container.id, final_name);
+    
+    state.podman.containers().get(&container.id).rename(&final_name).await
+        .map_err(|e| AppError::Podman(format!("Failed to rename container: {}", e)))?;
 
     let container_id = container.id.clone();
 

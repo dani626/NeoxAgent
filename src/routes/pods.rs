@@ -389,7 +389,9 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
         }
 
-        let ctr_opts = ctr_builder.build();
+        // Create with temporary name
+        let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let ctr_opts = ctr_builder.name(&temp_name).build();
 
         state.podman.containers()
             .create(&ctr_opts)
@@ -397,6 +399,12 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             .map_err(|e| AppError::Podman(format!(
                 "Failed to create container '{}' in pod '{}': {}", ctr_name, req.name, e
             )))?;
+
+        // Rename to final name-shortid
+        let short_id = &created.id[..12];
+        let final_name = format!("{}-{}", ctr_name, short_id);
+        state.podman.containers().get(&created.id).rename(&final_name).await
+            .map_err(|e| AppError::Internal(format!("Failed to rename container: {}", e)))?;
 
         tracing::info!("✅ Container '{}' created in pod '{}'", ctr_name, req.name);
     }
@@ -641,7 +649,9 @@ pub async fn add_container_to_pod(
         ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
     }
 
-    let ctr_opts = ctr_builder.build();
+    // Create with temporary name
+    let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
+    let ctr_opts = ctr_builder.name(&temp_name).build();
 
     let created = state.podman.containers()
         .create(&ctr_opts)
@@ -649,6 +659,12 @@ pub async fn add_container_to_pod(
         .map_err(|e| AppError::Podman(format!(
             "Failed to create container '{}' in pod '{}': {}", ctr_name, id, e
         )))?;
+
+    // Rename to final name-shortid
+    let short_id = &created.id[..12];
+    let final_name = format!("{}-{}", ctr_name, short_id);
+    state.podman.containers().get(&created.id).rename(&final_name).await
+        .map_err(|e| AppError::Internal(format!("Failed to rename container: {}", e)))?;
 
     let container_id = created.id.clone();
     tracing::info!("✅ Container '{}' added to pod '{}' (id: {})", ctr_name, id, container_id);
