@@ -375,16 +375,18 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             ]);
         }
 
-        // Apply command override
-        if !ctr_spec.command.is_empty() {
-            ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
-        }
-
         // Apply entrypoint override
         if let Some(ref entrypoint) = ctr_spec.entrypoint {
             if !entrypoint.is_empty() {
+                tracing::info!("🛠️ [POD] Overriding entrypoint for '{}' to: {:?}", ctr_name, entrypoint);
                 ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
             }
+        }
+
+        // Apply command override
+        if !ctr_spec.command.is_empty() {
+            tracing::info!("🛠️ [POD] Overriding command for '{}' to: {:?}", ctr_name, ctr_spec.command);
+            ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
         }
 
         let ctr_opts = ctr_builder.build();
@@ -625,16 +627,18 @@ pub async fn add_container_to_pod(
         ]);
     }
 
-    // Command override
-    if !ctr.command.is_empty() {
-        ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
-    }
-
     // Entrypoint override
     if let Some(ref entrypoint) = ctr.entrypoint {
         if !entrypoint.is_empty() {
+            tracing::info!("🛠️ [POD ADD] Overriding entrypoint for '{}' to: {:?}", ctr_name, entrypoint);
             ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
         }
+    }
+
+    // Command override
+    if !ctr.command.is_empty() {
+        tracing::info!("🛠️ [POD ADD] Overriding command for '{}' to: {:?}", ctr_name, ctr.command);
+        ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
     }
 
     let ctr_opts = ctr_builder.build();
