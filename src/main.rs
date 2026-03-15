@@ -184,6 +184,13 @@ async fn main() {
             "/api/pods/{id}/logs",
             get(routes::pods::get_pod_logs),
         )
+        // ─── Phase 3: Pod container management ─────────────────────
+        .route(
+            "/api/pods/{id}/containers",
+            post(routes::pods::add_container_to_pod),
+        )
+        // ─── Volumes ────────────────────────────────────────────────
+        .nest("/api/volumes", routes::volumes::router())
         // ─── Phase 3: Pod lifecycle routes ──────────────────────────
         .route(
             "/api/pods/{id}/start",

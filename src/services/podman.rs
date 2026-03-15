@@ -3,6 +3,7 @@ use std::sync::Arc;
 use podman_api::opts::{
     ContainerCreateOpts, ContainerDeleteOpts, ContainerListOpts, ContainerStopOpts,
     ContainerRestartPolicy,
+    VolumeCreateOpts, VolumeListOpts,
 };
 use podman_api::models::PortMapping as PodmanPortMapping;
 
@@ -10,6 +11,7 @@ use crate::error::AppError;
 use crate::models::container::{
     ContainerResponse, CreateContainerRequest, PortMapping, ResourceLimits,
 };
+use crate::models::volume::{VolumeResponse, CreateVolumeRequest};
 use crate::AppState;
 
 /// Creates a container from the API request using Podman's native SDK.
@@ -519,4 +521,72 @@ pub async fn get_pod_logs(
     _tail: Option<usize>,
 ) -> Result<String, AppError> {
     Err(AppError::Podman("Pod logs stream not natively supported by Podman API".to_string()))
+}
+
+// ─── Volumes ───────────────────────────────────────────
+
+pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, AppError> {
+    let opts = VolumeListOpts::builder().build();
+    let volumes = state.podman.volumes().list(&opts).await
+        .map_err(|e| AppError::Podman(format!("Failed to list volumes: {}", e)))?;
+
+    let list = volumes.iter().map(|v| VolumeResponse {
+        name: v.name.clone().unwrap_or_default(),
+        driver: v.driver.clone().unwrap_or_default(),
+        mountpoint: v.mountpoint.clone().unwrap_or_default(),
+        created_at: v.created_at.clone().unwrap_or_default(),
+        labels: v.labels.clone().unwrap_or_default(),
+        options: v.options.clone().unwrap_or_default(),
+    }).collect();
+
+    Ok(list)
+}
+
+pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> Result<VolumeResponse, AppError> {
+    let mut builder = VolumeCreateOpts::builder().name(&req.name);
+    
+    if let Some(ref driver) = req.driver {
+        builder = builder.driver(driver);
+    }
+    
+    if let Some(ref labels) = req.labels {
+        builder = builder.labels(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    
+    if let Some(ref options) = req.options {
+        builder = builder.opts(options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+
+    let opts = builder.build();
+    let volume = state.podman.volumes().create(&opts).await
+        .map_err(|e| AppError::Podman(format!("Failed to create volume: {}", e)))?;
+
+    Ok(VolumeResponse {
+        name: volume.name.clone().unwrap_or_default(),
+        driver: volume.driver.clone().unwrap_or_default(),
+        mountpoint: volume.mountpoint.clone().unwrap_or_default(),
+        created_at: volume.created_at.clone().unwrap_or_default(),
+        labels: volume.labels.clone().unwrap_or_default(),
+        options: volume.options.clone().unwrap_or_default(),
+    })
+}
+
+pub async fn delete_volume(state: &Arc<AppState>, name: &str, force: bool) -> Result<(), AppError> {
+    state.podman.volumes().get(name).delete(force).await
+        .map_err(|e| AppError::Podman(format!("Failed to delete volume '{}': {}", name, e)))?;
+    Ok(())
+}
+
+pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeResponse, AppError> {
+    let volume = state.podman.volumes().get(name).inspect().await
+        .map_err(|e| AppError::Podman(format!("Failed to inspect volume '{}': {}", name, e)))?;
+
+    Ok(VolumeResponse {
+        name: volume.name.clone().unwrap_or_default(),
+        driver: volume.driver.clone().unwrap_or_default(),
+        mountpoint: volume.mountpoint.clone().unwrap_or_default(),
+        created_at: volume.created_at.clone().unwrap_or_default(),
+        labels: volume.labels.clone().unwrap_or_default(),
+        options: volume.options.clone().unwrap_or_default(),
+    })
 }
