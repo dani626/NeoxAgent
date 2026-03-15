@@ -678,6 +678,7 @@ pub async fn generate_kube_yaml(
     })))
 }
 
+/*
 /// GET /api/pods/:id/logs
 pub async fn get_pod_logs(
     State(state): State<Arc<AppState>>,
@@ -686,6 +687,7 @@ pub async fn get_pod_logs(
 ) -> Result<String, AppError> {
     crate::services::podman::get_pod_logs(&state, &id, query.tail).await
 }
+*/
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -467,7 +467,12 @@ pub async fn get_container_logs(
     while let Some(chunk) = logs.next().await {
         match chunk {
             Ok(chunk) => {
-                let text = String::from_utf8_lossy(&chunk.data);
+                let data = match chunk {
+                    podman_api::conn::TtyChunk::StdOut(d) => d,
+                    podman_api::conn::TtyChunk::StdErr(d) => d,
+                    podman_api::conn::TtyChunk::StdIn(d) => d,
+                };
+                let text = String::from_utf8_lossy(&data);
                 output.push_str(&text);
             }
             Err(e) => return Err(AppError::Podman(format!("Error reading logs: {}", e))),
@@ -477,7 +482,8 @@ pub async fn get_container_logs(
     Ok(output)
 }
 
-/// Fetches logs from a pod (all containers).
+// Fetches logs from a pod (all containers).
+/*
 pub async fn get_pod_logs(
     state: &Arc<AppState>,
     id: &str,
@@ -496,7 +502,12 @@ pub async fn get_pod_logs(
     while let Some(chunk) = logs.next().await {
         match chunk {
             Ok(chunk) => {
-                let text = String::from_utf8_lossy(&chunk.data);
+                let data = match chunk {
+                    podman_api::conn::TtyChunk::StdOut(d) => d,
+                    podman_api::conn::TtyChunk::StdErr(d) => d,
+                    podman_api::conn::TtyChunk::StdIn(d) => d,
+                };
+                let text = String::from_utf8_lossy(&data);
                 output.push_str(&text);
                 count += 1;
                 if count >= limit && tail.is_some() {
@@ -509,3 +520,4 @@ pub async fn get_pod_logs(
 
     Ok(output)
 }
+*/

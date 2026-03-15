@@ -180,10 +180,12 @@ async fn main() {
             get(routes::pods::get_pod)
                 .delete(routes::pods::delete_pod),
         )
+        /*
         .route(
             "/api/pods/{id}/logs",
             get(routes::pods::get_pod_logs),
         )
+        */
         // ─── Phase 3: Pod lifecycle routes ──────────────────────────
         .route(
             "/api/pods/{id}/start",
@@ -197,10 +199,12 @@ async fn main() {
             "/api/pods/{id}/restart",
             post(routes::pods::restart_pod),
         )
+        /*
         .route(
             "/api/pods/{id}/logs/stream",
             get(routes::ws::ws_pod_logs_stream),
         )
+        */
         // ─── Phase 3: Pod container management ─────────────────────
         .route(
             "/api/pods/{id}/containers",
