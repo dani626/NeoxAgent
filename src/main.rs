@@ -197,6 +197,10 @@ async fn main() {
             "/api/pods/{id}/restart",
             post(routes::pods::restart_pod),
         )
+        .route(
+            "/api/pods/{id}/logs/stream",
+            get(routes::ws::ws_pod_logs_stream),
+        )
         // ─── Phase 3: Pod container management ─────────────────────
         .route(
             "/api/pods/{id}/containers",

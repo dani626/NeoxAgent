@@ -37,11 +37,24 @@ pub async fn auth_middleware(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
 
-    let token = if let Some(bearer) = auth_header.strip_prefix("Bearer ") {
-        bearer.trim()
+    let mut token = if let Some(bearer) = auth_header.strip_prefix("Bearer ") {
+        bearer.trim().to_string()
     } else {
-        ""
+        String::new()
     };
+
+    // If still empty, check query params (useful for WebSockets)
+    if token.is_empty() {
+        if let Some(query) = request.uri().query() {
+            for pair in query.split('&') {
+                let mut parts = pair.splitn(2, '=');
+                if let (Some("token"), Some(val)) = (parts.next(), parts.next()) {
+                    token = val.to_string();
+                    break;
+                }
+            }
+        }
+    }
 
     if token.is_empty() || token != expected_key {
         tracing::warn!(
