@@ -455,11 +455,15 @@ pub async fn get_container_logs(
     use podman_api::opts::ContainerLogsOpts;
 
     let container = state.podman.containers().get(id);
-    let opts = ContainerLogsOpts::builder()
+    let mut opts_builder = ContainerLogsOpts::builder()
         .stdout(true)
-        .stderr(true)
-        .tail(tail.map(|n| n.to_string()).as_deref())
-        .build();
+        .stderr(true);
+        
+    if let Some(t) = tail {
+        opts_builder = opts_builder.tail(t.to_string());
+    }
+    
+    let opts = opts_builder.build();
 
     let mut logs = container.logs(&opts);
     let mut output = String::new();
