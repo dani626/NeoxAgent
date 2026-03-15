@@ -660,78 +660,14 @@ pub async fn ws_pod_logs_stream(
 
 async fn handle_pod_logs_stream(
     mut socket: WebSocket,
-    state: Arc<AppState>,
+    _state: Arc<AppState>,
     id: String,
     _query: LogsStreamQuery,
 ) {
-    let pod = state.podman.pods().get(&id);
-    let mut logs_stream = pod.logs();
-
-    // Initial ack
-    let ack = json!({
-        "type": "connected",
-        "pod_id": id,
-        "message": "Pod log streaming started"
+    let error_msg = json!({
+        "type": "error",
+        "container_id": id,
+        "message": "Pod logs stream not natively supported by Podman API"
     });
-    if socket.send(Message::Text(ack.to_string().into())).await.is_err() {
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            chunk = logs_stream.next() => {
-                match chunk {
-                    Some(Ok(tty_chunk)) => {
-                        let (stream_type, data) = match tty_chunk {
-                            TtyChunk::StdOut(data) => ("stdout", data),
-                            TtyChunk::StdErr(data) => ("stderr", data),
-                            TtyChunk::StdIn(data) => ("stdin", data),
-                        };
-
-                        let text = String::from_utf8_lossy(&data);
-                        let msg = json!({
-                            "type": "log",
-                            "stream": stream_type,
-                            "data": text.trim_end(),
-                        });
-
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Err(e)) => {
-                        let error_msg = json!({
-                            "type": "error",
-                            "message": format!("Pod log stream error: {}", e),
-                        });
-                        let _ = socket.send(Message::Text(error_msg.to_string().into())).await;
-                        break;
-                    }
-                    None => {
-                        let end_msg = json!({
-                            "type": "disconnected",
-                            "message": "Pod log stream ended",
-                        });
-                        let _ = socket.send(Message::Text(end_msg.to_string().into())).await;
-                        break;
-                    }
-                }
-            }
-
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("📡 Client closed pod log stream for '{}'", id);
-                        break;
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        if socket.send(Message::Pong(data)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    let _ = socket.send(Message::Text(error_msg.to_string().into())).await;
 }
