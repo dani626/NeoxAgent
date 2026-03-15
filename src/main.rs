@@ -320,7 +320,7 @@ async fn main() {
             delete(routes::images::delete_image),
         )
         .route(
-            "/api/images/{id}/inspect",
+            "/api/images/inspect",
             get(routes::images::inspect_image),
         )
         // ─── Phase 7: Systemd ────────────────────────────────────
