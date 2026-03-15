@@ -319,6 +319,10 @@ async fn main() {
             "/api/images/{id}",
             delete(routes::images::delete_image),
         )
+        .route(
+            "/api/images/{id}/inspect",
+            get(routes::images::inspect_image),
+        )
         // ─── Phase 7: Systemd ────────────────────────────────────
         .route(
             "/api/pods/{id}/systemd/generate",

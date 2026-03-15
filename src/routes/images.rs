@@ -305,3 +305,23 @@ async fn handle_pull_stream(mut socket: WebSocket, state: Arc<AppState>) {
 
     tracing::info!("✅ [WS] Image pull stream complete: {}", image_ref);
 }
+
+// ─── GET /api/images/:id/inspect — Inspect Image ─────────────────────────────
+
+/// GET /api/images/:id/inspect
+/// Returns detailed metadata about an image.
+pub async fn inspect_image(
+    State(state): State<Arc<AppState>>,
+    Path(image_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    tracing::info!("🔍 Inspecting image: {}", image_id);
+
+    let image = state.podman.images().get(&image_id);
+
+    let inspect = image
+        .inspect()
+        .await
+        .map_err(|e| AppError::Podman(format!("Failed to inspect image '{}': {}", image_id, e)))?;
+
+    Ok(Json(json!(inspect)))
+}
