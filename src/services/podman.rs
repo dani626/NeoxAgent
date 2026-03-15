@@ -444,3 +444,68 @@ pub async fn kill_container(
         .map_err(|e| AppError::Podman(format!("Failed to kill container '{}': {}", id, e)))?;
     Ok(())
 }
+
+/// Fetches logs from a container.
+pub async fn get_container_logs(
+    state: &Arc<AppState>,
+    id: &str,
+    tail: Option<usize>,
+) -> Result<String, AppError> {
+    use futures_util::StreamExt;
+    use podman_api::opts::ContainerLogsOpts;
+
+    let container = state.podman.containers().get(id);
+    let opts = ContainerLogsOpts::builder()
+        .stdout(true)
+        .stderr(true)
+        .tail(tail.map(|n| n.to_string()).as_deref())
+        .build();
+
+    let mut logs = container.logs(&opts);
+    let mut output = String::new();
+
+    while let Some(chunk) = logs.next().await {
+        match chunk {
+            Ok(chunk) => {
+                let text = String::from_utf8_lossy(&chunk.data);
+                output.push_str(&text);
+            }
+            Err(e) => return Err(AppError::Podman(format!("Error reading logs: {}", e))),
+        }
+    }
+
+    Ok(output)
+}
+
+/// Fetches logs from a pod (all containers).
+pub async fn get_pod_logs(
+    state: &Arc<AppState>,
+    id: &str,
+    tail: Option<usize>,
+) -> Result<String, AppError> {
+    use futures_util::StreamExt;
+
+    let pod = state.podman.pods().get(id);
+    // Pod logs usually don't have as many options as container logs in the SDK
+    // but we can try to get them.
+    let mut logs = pod.logs();
+    let mut output = String::new();
+    let mut count = 0;
+    let limit = tail.unwrap_or(100);
+
+    while let Some(chunk) = logs.next().await {
+        match chunk {
+            Ok(chunk) => {
+                let text = String::from_utf8_lossy(&chunk.data);
+                output.push_str(&text);
+                count += 1;
+                if count >= limit && tail.is_some() {
+                    break;
+                }
+            }
+            Err(e) => return Err(AppError::Podman(format!("Error reading pod logs: {}", e))),
+        }
+    }
+
+    Ok(output)
+}

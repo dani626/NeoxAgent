@@ -133,3 +133,10 @@ pub struct StopContainerQuery {
     /// Timeout in seconds before sending SIGKILL (default: 10)
     pub timeout: Option<u64>,
 }
+
+/// Query parameters for GET /api/containers/:id/logs
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    /// Number of lines to show from the end of the logs
+    pub tail: Option<usize>,
+}

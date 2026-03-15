@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::models::container::{
-    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery,
+    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery, LogsQuery,
 };
 use crate::services::podman;
 use crate::AppState;
@@ -143,4 +143,13 @@ pub async fn kill_container(
         "message": format!("Container '{}' killed", id),
         "container_id": id,
     })))
+}
+
+/// GET /api/containers/:id/logs
+pub async fn get_container_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<String, AppError> {
+    podman::get_container_logs(&state, &id, query.tail).await
 }

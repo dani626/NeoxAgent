@@ -18,6 +18,7 @@ use crate::models::pod::{
     AddContainerToPodRequest, CreatePodRequest, DeletePodQuery, GenerateKubeQuery,
     PodContainerInfo, PodResponse, PodSummary,
 };
+use crate::models::container::LogsQuery;
 use crate::AppState;
 
 // ─── List Pods ───────────────────────────────────────────────────────────────
@@ -675,6 +676,15 @@ pub async fn generate_kube_yaml(
         "yaml": yaml,
         "service_included": query.service,
     })))
+}
+
+/// GET /api/pods/:id/logs
+pub async fn get_pod_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<String, AppError> {
+    crate::services::podman::get_pod_logs(&state, &id, query.tail).await
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

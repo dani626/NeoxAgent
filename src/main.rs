@@ -135,6 +135,10 @@ async fn main() {
             get(routes::containers::get_container)
                 .delete(routes::containers::delete_container),
         )
+        .route(
+            "/api/containers/{id}/logs",
+            get(routes::containers::get_container_logs),
+        )
         // ─── Container lifecycle routes ─────────────────────────────
         .route(
             "/api/containers/{id}/start",
@@ -175,6 +179,10 @@ async fn main() {
             "/api/pods/{id}",
             get(routes::pods::get_pod)
                 .delete(routes::pods::delete_pod),
+        )
+        .route(
+            "/api/pods/{id}/logs",
+            get(routes::pods::get_pod_logs),
         )
         // ─── Phase 3: Pod lifecycle routes ──────────────────────────
         .route(
