@@ -467,7 +467,12 @@ pub async fn get_container_logs(
     while let Some(chunk) = logs.next().await {
         match chunk {
             Ok(chunk) => {
-                let text = String::from_utf8_lossy(&chunk.data);
+                let data = match chunk {
+                    podman_api::conn::TtyChunk::StdOut(d) => d,
+                    podman_api::conn::TtyChunk::StdErr(d) => d,
+                    podman_api::conn::TtyChunk::StdIn(d) => d,
+                };
+                let text = String::from_utf8_lossy(&data);
                 output.push_str(&text);
             }
             Err(e) => return Err(AppError::Podman(format!("Error reading logs: {}", e))),
@@ -479,33 +484,9 @@ pub async fn get_container_logs(
 
 /// Fetches logs from a pod (all containers).
 pub async fn get_pod_logs(
-    state: &Arc<AppState>,
-    id: &str,
-    tail: Option<usize>,
+    _state: &Arc<AppState>,
+    _id: &str,
+    _tail: Option<usize>,
 ) -> Result<String, AppError> {
-    use futures_util::StreamExt;
-
-    let pod = state.podman.pods().get(id);
-    // Pod logs usually don't have as many options as container logs in the SDK
-    // but we can try to get them.
-    let mut logs = pod.logs();
-    let mut output = String::new();
-    let mut count = 0;
-    let limit = tail.unwrap_or(100);
-
-    while let Some(chunk) = logs.next().await {
-        match chunk {
-            Ok(chunk) => {
-                let text = String::from_utf8_lossy(&chunk.data);
-                output.push_str(&text);
-                count += 1;
-                if count >= limit && tail.is_some() {
-                    break;
-                }
-            }
-            Err(e) => return Err(AppError::Podman(format!("Error reading pod logs: {}", e))),
-        }
-    }
-
-    Ok(output)
+    Err(AppError::Podman("Pod logs stream not natively supported by Podman API".to_string()))
 }
