@@ -145,6 +145,7 @@ pub async fn create_pod(
                 .unwrap_or("localhost/neox-tproxy-sidecar:latest");
 
             let log_level = proxy.loglevel.as_deref().unwrap_or("warn");
+            let dns_server = proxy.dns.as_deref().unwrap_or("8.8.8.8");
 
             let sidecar_name = format!("{}-hev-tproxy", req.name);
 
@@ -205,6 +206,15 @@ misc:
   log-level: {log_level}
 HEVEOF
 
+# Force all DNS traffic (port 53) to the configured DNS server
+# This ensures it isn't routed to local/skipped IPs which would leak DNS
+iptables -t nat -N HEV_DNS 2>/dev/null || true
+iptables -t nat -F HEV_DNS
+iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A PREROUTING -j HEV_DNS
+iptables -t nat -A OUTPUT -j HEV_DNS
+
 # Setup TPROXY iptables rules (mangle table, not NAT)
 # Mark 0x438 = 1080 (used by hev to skip its own traffic)
 # Mark 0x440 = 1088 (tproxy mark for routing)
@@ -228,10 +238,6 @@ iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
 # Skip traffic to the SOCKS5 server itself
 iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
 
-# Skip DNS (port 53) — let DNS resolve via normal network
-iptables -t mangle -A HEV_TPROXY -p udp --dport 53 -j RETURN
-iptables -t mangle -A HEV_TPROXY -p tcp --dport 53 -j RETURN
-
 # TPROXY: redirect TCP+UDP to hev-socks5-tproxy on port 1088
 iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
 iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
@@ -252,9 +258,6 @@ iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
-# Skip DNS (port 53)
-iptables -t mangle -A HEV_OUTPUT -p udp --dport 53 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -p tcp --dport 53 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
 iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
 iptables -t mangle -A OUTPUT -j HEV_OUTPUT
@@ -821,6 +824,7 @@ pub async fn update_proxy(
         .unwrap_or("localhost/neox-tproxy-sidecar:latest");
 
     let log_level = req.proxy.loglevel.as_deref().unwrap_or("warn");
+    let dns_server = req.proxy.dns.as_deref().unwrap_or("8.8.8.8");
 
     // We can't reuse the exact old name if it's recently deleted in Podman sometimes so we append a random string
     let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
@@ -860,6 +864,14 @@ misc:
   log-file: stderr
   log-level: {log_level}
 HEVEOF
+
+iptables -t nat -N HEV_DNS 2>/dev/null || true
+iptables -t nat -F HEV_DNS
+iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A PREROUTING -j HEV_DNS
+iptables -t nat -A OUTPUT -j HEV_DNS
+
 iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
 iptables -t mangle -F HEV_TPROXY
 iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
@@ -872,8 +884,6 @@ iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
-iptables -t mangle -A HEV_TPROXY -p udp --dport 53 -j RETURN
-iptables -t mangle -A HEV_TPROXY -p tcp --dport 53 -j RETURN
 iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
 iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
 iptables -t mangle -A PREROUTING -j HEV_TPROXY
@@ -889,8 +899,6 @@ iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
-iptables -t mangle -A HEV_OUTPUT -p udp --dport 53 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -p tcp --dport 53 -j RETURN
 iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
 iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
 iptables -t mangle -A OUTPUT -j HEV_OUTPUT
