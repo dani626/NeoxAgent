@@ -60,6 +60,7 @@ fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String
 ///   any packet that was NOT marked by hev (mark 0x438 or 0x440). This means
 ///   if hev dies and the TPROXY redirect stops working, unredirected packets
 ///   hit FAILSAFE and are dropped — the VPS IP is never exposed.
+///   ICMP is also dropped so pings cannot reveal the VPS IP when hev is down.
 ///
 /// Layer 3 — Watchdog wrapper:
 ///   hev runs inside a loop. If it exits for any reason, the wrapper
@@ -70,6 +71,11 @@ fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String
 /// Layer 4 — Proxy-host exclusion:
 ///   The IP of the upstream SOCKS5 proxy is always excluded from redirection
 ///   so hev itself can reach the proxy server directly.
+///
+/// # Race condition fix (startup ordering):
+///   The sidecar container is started BEFORE pod.start() is called.
+///   This ensures NEOX_GUARD is active in the shared pod network namespace
+///   before any main container begins sending traffic.
 fn build_tproxy_script(
     proxy_host: &str,
     proxy_port: &str,
@@ -200,6 +206,7 @@ iptables -t mangle -A OUTPUT -j HEV_OUTPUT
 # Any packet that was NOT marked by hev (0x438 = hev internal, 0x440 = tproxy)
 # and is NOT loopback or private gets DROPPED here. This is the last line of
 # defense if hev dies and the TPROXY redirect stops working.
+# ICMP is also dropped to prevent VPS IP discovery via ping when hev is down.
 # ════════════════════════════════════════════════════════════════════════════
 iptables -t mangle -N HEV_FAILSAFE 2>/dev/null || true
 iptables -t mangle -F HEV_FAILSAFE
@@ -217,9 +224,10 @@ iptables -t mangle -A HEV_FAILSAFE -d 224.0.0.0/4   -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 240.0.0.0/4   -j RETURN
 # Allow outbound to the proxy server itself (hev needs to reach it directly)
 iptables -t mangle -A HEV_FAILSAFE -d {proxy_host}   -j RETURN
-# DROP everything else — if hev is dead, nothing leaks
-iptables -t mangle -A HEV_FAILSAFE -p tcp -j DROP
-iptables -t mangle -A HEV_FAILSAFE -p udp -j DROP
+# DROP everything else — tcp, udp AND icmp — if hev is dead, nothing leaks
+iptables -t mangle -A HEV_FAILSAFE -p tcp  -j DROP
+iptables -t mangle -A HEV_FAILSAFE -p udp  -j DROP
+iptables -t mangle -A HEV_FAILSAFE -p icmp -j DROP
 # Attach AFTER HEV_TPROXY/HEV_OUTPUT so normal hev traffic is never blocked
 iptables -t mangle -D PREROUTING -j HEV_FAILSAFE 2>/dev/null || true
 iptables -t mangle -D OUTPUT     -j HEV_FAILSAFE 2>/dev/null || true
@@ -237,7 +245,7 @@ ip route add local default dev lo table 100 2>/dev/null || true
 # ════════════════════════════════════════════════════════════════════════════
 remove_neox_guard
 
-echo "[neox-tproxy] iptables rules installed. FAILSAFE active. Starting hev..."
+echo "[neox-tproxy] iptables rules installed. FAILSAFE active (tcp+udp+icmp). Starting hev..."
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer 3 — Watchdog wrapper
@@ -357,6 +365,12 @@ pub async fn list_pods(
 // ─── Create Pod ───────────────────────────────────────────────────────────────
 
 /// POST /api/pods
+///
+/// # Startup ordering (race condition fix):
+///   When proxy is enabled, the sidecar container is started FIRST before
+///   pod.start() is called. Since all containers in a pod share the same
+///   network namespace, NEOX_GUARD is active in that namespace before any
+///   main container process can send a single packet.
 pub async fn create_pod(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePodRequest>,
@@ -394,6 +408,7 @@ pub async fn create_pod(
 
     let proxy_enabled = req.proxy.as_ref().map_or(false, |p| p.enabled);
     let mut proxy_url_out: Option<String> = None;
+    let mut sidecar_id: Option<String> = None;
 
     if proxy_enabled {
         if let Some(proxy) = &req.proxy {
@@ -446,12 +461,22 @@ pub async fn create_pod(
                 ])
                 .build();
 
-            state.podman.containers().create(&sidecar_opts).await
+            let created_sidecar = state.podman.containers().create(&sidecar_opts).await
                 .map_err(|e| AppError::Podman(format!(
                     "Failed to create sidecar '{}': {}", sidecar_name, e)))?;
-            tracing::info!("✅ Sidecar '{}' created (restart: {})",
+
+            // ── Race condition fix ────────────────────────────────────────────
+            // Start the sidecar BEFORE pod.start() so NEOX_GUARD is installed
+            // in the shared pod network namespace before any main container
+            // can send traffic. All containers in a pod share one netns, so
+            // iptables rules written by the sidecar protect all of them.
+            state.podman.containers().get(&created_sidecar.id).start(None).await
+                .map_err(|e| AppError::Podman(format!(
+                    "Failed to start sidecar '{}': {}", sidecar_name, e)))?;
+            tracing::info!("✅ Sidecar '{}' started first — NEOX_GUARD active (restart: {})",
                 sidecar_name, tproxy_restart_policy());
 
+            sidecar_id = Some(created_sidecar.id);
             set_pod_proxy_label(&req.name, socks5_url);
             proxy_url_out = Some(socks5_url.to_string());
         }
@@ -528,11 +553,13 @@ pub async fn create_pod(
         tracing::info!("✅ Container '{}' created", ctr_name);
     }
 
+    // Start the pod (and remaining containers). Sidecar already running.
     tracing::info!("🚀 Starting pod '{}'", req.name);
     pod.start().await
         .map_err(|e| AppError::Podman(
             format!("Failed to start pod '{}': {}", req.name, e)))?;
-    tracing::info!("✅ Pod '{}' started", req.name);
+    tracing::info!("✅ Pod '{}' started (sidecar pre-started: {})",
+        req.name, sidecar_id.is_some());
 
     let inspect = pod.inspect().await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod: {}", e)))?;
@@ -792,10 +819,10 @@ pub async fn rename_pod(
 ///   1. Inspect pod to find existing sidecar(s).
 ///   2. Force-delete old sidecar — its iptables rules stay in the kernel
 ///      (HEV_TPROXY still redirects, but nobody listens → packets dropped).
-///   3. Create new sidecar with restart policy.
-///   4. Start new sidecar → script runs → NEOX_GUARD blocks all immediately
-///      → installs HEV_FAILSAFE (permanent kill-switch) → flushes+rewrites
-///      HEV_TPROXY/HEV_OUTPUT → lifts NEOX_GUARD → starts hev.
+///   3. Create AND START new sidecar first — script installs NEOX_GUARD
+///      immediately, so there is no gap between old sidecar death and new
+///      sidecar taking over.
+///   4. pod.start() / running containers continue under new proxy rules.
 ///   At no point does unproxied traffic reach the internet.
 pub async fn update_proxy(
     State(state): State<Arc<AppState>>,
@@ -882,13 +909,17 @@ pub async fn update_proxy(
         .map_err(|e| AppError::Podman(
             format!("Failed to create sidecar '{}': {}", sidecar_name, e)))?;
 
+    // ── Race condition fix ────────────────────────────────────────────────────
+    // Start sidecar immediately after creation so NEOX_GUARD is installed
+    // in the pod netns before the old rules (from the deleted sidecar) can
+    // be cleared and before any main container sends unproxied traffic.
     state.podman.containers().get(&created.id).start(None).await
         .map_err(|e| AppError::Podman(
             format!("Failed to start sidecar '{}': {}", sidecar_name, e)))?;
 
     set_pod_proxy_label(&pod_name, socks5_url);
 
-    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' (restart: {})",
+    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started (restart: {})",
         id, sidecar_name, tproxy_restart_policy());
     Ok(Json(json!({
         "success": true,
