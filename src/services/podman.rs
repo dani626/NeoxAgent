@@ -535,8 +535,8 @@ pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, 
         driver: v.driver.clone().unwrap_or_default(),
         mountpoint: v.mountpoint.clone().unwrap_or_default(),
         created_at: v.created_at.clone().unwrap_or_default(),
-        labels: v.labels.clone().unwrap_or_default(),
-        options: v.options.clone().unwrap_or_default(),
+        labels: v.labels.clone(),
+        options: v.options.clone(),
     }).collect();
 
     Ok(list)
@@ -566,8 +566,8 @@ pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> R
         driver: volume.driver.clone().unwrap_or_default(),
         mountpoint: volume.mountpoint.clone().unwrap_or_default(),
         created_at: volume.created_at.clone().unwrap_or_default(),
-        labels: volume.labels.clone().unwrap_or_default(),
-        options: volume.options.clone().unwrap_or_default(),
+        labels: volume.labels.clone(),
+        options: volume.options.clone(),
     })
 }
 
@@ -586,7 +586,7 @@ pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeR
         driver: volume.driver.clone().unwrap_or_default(),
         mountpoint: volume.mountpoint.clone().unwrap_or_default(),
         created_at: volume.created_at.clone().unwrap_or_default(),
-        labels: volume.labels.clone().unwrap_or_default(),
-        options: volume.options.clone().unwrap_or_default(),
+        labels: volume.labels.clone(),
+        options: volume.options.clone(),
     })
 }
