@@ -163,7 +163,6 @@ pub async fn create_container(
         builder = builder.command(req.command.iter().map(|s| s.as_str()));
     }
 
-    // Build and create
     // Build and create with a temporary name
     let temp_name = format!("{}-tmp-{}", req.name, uuid::Uuid::new_v4().to_string()[..8].to_string());
     let opts = builder.name(&temp_name).build();
@@ -397,13 +396,10 @@ pub async fn start_container(
         if let Some(limits) = inspect.limits {
             if let Some(speed) = limits.network_speed_mbps {
                 if speed > 0 {
-                    // Try to get PID and apply tc
                     if let Ok(raw_inspect) = container.inspect().await {
                         if let Some(c_state) = raw_inspect.state {
                             if let Some(pid) = c_state.pid {
                                 if pid > 0 {
-                                    // Apply tc via nsenter
-                                    // We use `replace` instead of `add` so it works even if already applied
                                     let _ = std::process::Command::new("nsenter")
                                         .args(&[
                                             "-t", &pid.to_string(),
@@ -531,12 +527,12 @@ pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, 
         .map_err(|e| AppError::Podman(format!("Failed to list volumes: {}", e)))?;
 
     let list = volumes.iter().map(|v| VolumeResponse {
-        name: v.name.clone(),
-        driver: v.driver.clone(),
-        mountpoint: v.mountpoint.clone(),
-        created_at: v.created_at.clone(),
-        labels: v.labels.clone(),
-        options: v.options.clone(),
+        name:        v.name.clone().unwrap_or_default(),
+        driver:      v.driver.clone().unwrap_or_default(),
+        mountpoint:  v.mountpoint.clone().unwrap_or_default(),
+        created_at:  v.created_at.clone().map(|dt| dt.to_rfc3339()),
+        labels:      v.labels.clone().unwrap_or_default(),
+        options:     v.options.clone().unwrap_or_default(),
     }).collect();
 
     Ok(list)
@@ -554,7 +550,7 @@ pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> R
     }
     
     if let Some(ref options) = req.options {
-        builder = builder.opts(options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        builder = builder.options(options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
 
     let opts = builder.build();
@@ -562,16 +558,16 @@ pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> R
         .map_err(|e| AppError::Podman(format!("Failed to create volume: {}", e)))?;
 
     Ok(VolumeResponse {
-        name: volume.name.clone(),
-        driver: volume.driver.clone(),
-        mountpoint: volume.mountpoint.clone(),
-        created_at: volume.created_at.clone(),
-        labels: volume.labels.clone(),
-        options: volume.options.clone(),
+        name:        volume.name.clone().unwrap_or_default(),
+        driver:      volume.driver.clone().unwrap_or_default(),
+        mountpoint:  volume.mountpoint.clone().unwrap_or_default(),
+        created_at:  volume.created_at.clone().map(|dt| dt.to_rfc3339()),
+        labels:      volume.labels.clone().unwrap_or_default(),
+        options:     volume.options.clone().unwrap_or_default(),
     })
 }
 
-pub async fn delete_volume(state: &Arc<AppState>, name: &str, force: bool) -> Result<(), AppError> {
+pub async fn delete_volume(state: &Arc<AppState>, name: &str, _force: bool) -> Result<(), AppError> {
     state.podman.volumes().get(name).remove().await
         .map_err(|e| AppError::Podman(format!("Failed to delete volume '{}': {}", name, e)))?;
     Ok(())
@@ -582,11 +578,11 @@ pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeR
         .map_err(|e| AppError::Podman(format!("Failed to inspect volume '{}': {}", name, e)))?;
 
     Ok(VolumeResponse {
-        name: volume.name.clone(),
-        driver: volume.driver.clone(),
-        mountpoint: volume.mountpoint.clone(),
-        created_at: volume.created_at.clone(),
-        labels: volume.labels.clone(),
-        options: volume.options.clone(),
+        name:        volume.name.clone().unwrap_or_default(),
+        driver:      volume.driver.clone().unwrap_or_default(),
+        mountpoint:  volume.mountpoint.clone().unwrap_or_default(),
+        created_at:  volume.created_at.clone().map(|dt| dt.to_rfc3339()),
+        labels:      volume.labels.clone().unwrap_or_default(),
+        options:     volume.options.clone().unwrap_or_default(),
     })
 }

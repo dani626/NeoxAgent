@@ -5,7 +5,7 @@ pub struct VolumeResponse {
     pub name: String,
     pub driver: String,
     pub mountpoint: String,
-    pub created_at: String,
+    pub created_at: Option<String>,
     pub labels: std::collections::HashMap<String, String>,
     pub options: std::collections::HashMap<String, String>,
 }
