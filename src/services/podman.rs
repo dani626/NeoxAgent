@@ -531,10 +531,10 @@ pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, 
         .map_err(|e| AppError::Podman(format!("Failed to list volumes: {}", e)))?;
 
     let list = volumes.iter().map(|v| VolumeResponse {
-        name: v.name.clone().unwrap_or_default(),
-        driver: v.driver.clone().unwrap_or_default(),
-        mountpoint: v.mountpoint.clone().unwrap_or_default(),
-        created_at: v.created_at.clone().unwrap_or_default(),
+        name: v.name.clone(),
+        driver: v.driver.clone(),
+        mountpoint: v.mountpoint.clone(),
+        created_at: v.created_at.clone(),
         labels: v.labels.clone(),
         options: v.options.clone(),
     }).collect();
@@ -562,17 +562,17 @@ pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> R
         .map_err(|e| AppError::Podman(format!("Failed to create volume: {}", e)))?;
 
     Ok(VolumeResponse {
-        name: volume.name.clone().unwrap_or_default(),
-        driver: volume.driver.clone().unwrap_or_default(),
-        mountpoint: volume.mountpoint.clone().unwrap_or_default(),
-        created_at: volume.created_at.clone().unwrap_or_default(),
+        name: volume.name.clone(),
+        driver: volume.driver.clone(),
+        mountpoint: volume.mountpoint.clone(),
+        created_at: volume.created_at.clone(),
         labels: volume.labels.clone(),
         options: volume.options.clone(),
     })
 }
 
 pub async fn delete_volume(state: &Arc<AppState>, name: &str, force: bool) -> Result<(), AppError> {
-    state.podman.volumes().get(name).delete(force).await
+    state.podman.volumes().get(name).remove().await
         .map_err(|e| AppError::Podman(format!("Failed to delete volume '{}': {}", name, e)))?;
     Ok(())
 }
@@ -582,10 +582,10 @@ pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeR
         .map_err(|e| AppError::Podman(format!("Failed to inspect volume '{}': {}", name, e)))?;
 
     Ok(VolumeResponse {
-        name: volume.name.clone().unwrap_or_default(),
-        driver: volume.driver.clone().unwrap_or_default(),
-        mountpoint: volume.mountpoint.clone().unwrap_or_default(),
-        created_at: volume.created_at.clone().unwrap_or_default(),
+        name: volume.name.clone(),
+        driver: volume.driver.clone(),
+        mountpoint: volume.mountpoint.clone(),
+        created_at: volume.created_at.clone(),
         labels: volume.labels.clone(),
         options: volume.options.clone(),
     })
