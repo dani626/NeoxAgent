@@ -22,7 +22,7 @@ use crate::models::pod::{
 use crate::models::container::LogsQuery;
 use crate::AppState;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Parses a socks5://[user:pass@]host:port URL into (user, pass, host, port).
 fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String, String) {
@@ -67,7 +67,7 @@ fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String
 ///   hev runs inside a loop. If it exits for any reason, the wrapper
 ///   immediately reinstalls NEOX_GUARD (blocking all traffic) before sleeping
 ///   and letting Podman's restart policy bring the container up again.
-///   Podman restart policy: on-failure:10 with a 5-second back-off.
+///   Podman restart policy: on-failure with restart_tries=10.
 ///
 /// Layer 4 — Proxy-host exclusion:
 ///   The IP of the upstream SOCKS5 proxy is always excluded from redirection
@@ -271,13 +271,6 @@ exit 1
     )
 }
 
-/// Returns the Podman restart policy for the tproxy sidecar.
-/// OnFailure(10) = retry up to 10 times if the container exits non-zero.
-/// Each restart re-executes the full script, reinstalling NEOX_GUARD first.
-fn tproxy_restart_policy() -> ContainerRestartPolicy {
-    ContainerRestartPolicy::OnFailure(10)
-}
-
 /// Writes neox.proxy.url label to the pod via `podman pod label`.
 fn set_pod_proxy_label(pod_name: &str, socks5_url: &str) {
     let label = format!("neox.proxy.url={}", socks5_url);
@@ -443,9 +436,10 @@ pub async fn create_pod(
                 .image(proxy_image)
                 .pod(req.name.as_str())
                 .privileged(true)
-                // restart policy: on-failure:10 — each restart re-runs the full
-                // script, which reinstalls NEOX_GUARD before lifting it again.
-                .restart_policy(tproxy_restart_policy())
+                // restart_policy: OnFailure (unit variant) + restart_tries: 10
+                // Each restart re-runs the full script, reinstalling NEOX_GUARD first.
+                .restart_policy(ContainerRestartPolicy::OnFailure)
+                .restart_tries(10)
                 .mounts(vec![ContainerMount {
                     destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
                     source:      Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
@@ -888,8 +882,10 @@ pub async fn update_proxy(
         .image(proxy_image)
         .pod(pod_name.as_str())
         .privileged(true)
-        // restart policy: on-failure:10 — each restart reinstalls NEOX_GUARD first
-        .restart_policy(tproxy_restart_policy())
+        // restart_policy: OnFailure (unit variant) + restart_tries: 10
+        // Each restart reinstalls NEOX_GUARD before lifting it again.
+        .restart_policy(ContainerRestartPolicy::OnFailure)
+        .restart_tries(10)
         .mounts(vec![ContainerMount {
             destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
             source:      Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
