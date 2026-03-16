@@ -428,7 +428,7 @@ pub async fn get_pod(
     let proxy_enabled = inspect.containers.as_ref()
         .map(|ctrs| ctrs.iter().any(|c| {
             let name = c.name.as_deref().unwrap_or("");
-            name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks")
+            name.contains("hev-tproxy")
         }))
         .unwrap_or(false);
 
@@ -608,7 +608,7 @@ pub async fn update_proxy(
     if let Some(ctrs) = &inspect.containers {
         for c in ctrs {
             let name = c.name.as_deref().unwrap_or("");
-            if name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks") {
+            if name.contains("hev-tproxy") {
                 tracing::info!("🗑️ Removing sidecar: {}", name);
                 let ctr_id = c.id.clone().unwrap_or_default();
                 let _ = state.podman.containers().get(&ctr_id)
