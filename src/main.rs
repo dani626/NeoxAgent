@@ -376,7 +376,7 @@ async fn main() {
     tracing::info!("🚀 neoxagent listening on {}", bind_addr);
     tracing::info!("   Phase 1: API REST Base       — Active");
     tracing::info!("   Phase 2: Real-time (WS)      — Active");
-    tracing::info!("   Phase 3: Pods + Tun2socks    — Active");
+    tracing::info!("   Phase 3: Pods + hev-socks5-tproxy — Active");
     tracing::info!("   Phase 4: Kube YAML Support   — Active");
     tracing::info!("   Phase 5: File Manager        — Active");
     tracing::info!("   Phase 6: Backups             — Active");

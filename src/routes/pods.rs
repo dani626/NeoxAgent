@@ -10,7 +10,8 @@ use podman_api::models::{
     PortMapping as PodmanPortMapping,
 };
 use podman_api::opts::{
-    ContainerCreateOpts, ContainerDeleteOpts, PodCreateOpts, PodListOpts,
+    ContainerCreateOpts, ContainerDeleteOpts, ContainerRestartPolicy,
+    PodCreateOpts, PodListOpts,
 };
 
 use crate::error::AppError;
@@ -21,48 +22,61 @@ use crate::models::pod::{
 use crate::models::container::LogsQuery;
 use crate::AppState;
 
-// ─── List Pods ───────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-/// GET /api/pods
-pub async fn list_pods(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, AppError> {
-    let pods = state.podman.pods()
-        .list(&PodListOpts::builder().build())
-        .await
-        .map_err(|e| AppError::Podman(format!("Failed to list pods: {}", e)))?;
-
-    let summaries: Vec<PodSummary> = pods.iter().map(|p| {
-        PodSummary {
-            id: p.id.clone().unwrap_or_default(),
-            name: p.name.clone(),
-            status: p.status.clone(),
-            created: p.created.map(|t| t.to_rfc3339()),
-            num_containers: p.containers.as_ref().map(|c| c.len() as i64),
-            infra_id: p.infra_id.clone(),
-            labels: p.labels.clone(),
+/// Parses a socks5://[user:pass@]host:port URL into (user, pass, host, port).
+fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String, String) {
+    let url_str = socks5_url.trim_start_matches("socks5://");
+    let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
+        (Some(auth), rest)
+    } else {
+        (None, url_str)
+    };
+    let (proxy_host, proxy_port) = match host_part.split_once(':') {
+        Some((h, p)) => (h.to_string(), p.to_string()),
+        None => (host_part.to_string(), "1080".to_string()),
+    };
+    let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
+        match auth.split_once(':') {
+            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
+            None => (Some(auth.to_string()), None),
         }
-    }).collect();
-
-    let total = summaries.len();
-
-    Ok(Json(json!({
-        "pods": summaries,
-        "total": total,
-    })))
+    } else {
+      (None, None)
+    };
+    (proxy_user, proxy_pass, proxy_host, proxy_port)
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-/// Builds the bash startup script for the hev-socks5-tproxy sidecar.
-/// 
-/// Security properties:
-/// - Installs iptables DROP rules on mangle PREROUTING + OUTPUT **before** any
-///   hev configuration, so zero packets can escape during the swap window.
-/// - DROP rules are removed only right before `exec hev-socks5-tproxy`, so
-///   the window with no interception is at most a few milliseconds.
-/// - Skips DROP on loopback (127/8) so the container can still communicate
-///   internally during startup.
+/// Builds the bash entrypoint for the hev-socks5-tproxy sidecar.
+///
+/// # Security model (layered, defense-in-depth)
+///
+/// Layer 1 — NEOX_GUARD (gap protection):
+///   Installs a DROP-all chain in mangle PREROUTING+OUTPUT as the VERY FIRST
+///   action. Loopback is exempted. This runs on every start/restart, closing
+///   the race window between sidecar death and new sidecar taking over.
+///
+/// Layer 2 — HEV_FAILSAFE (permanent kill-switch):
+///   A separate mangle chain that runs AFTER HEV_TPROXY/HEV_OUTPUT and drops
+///   any packet that was NOT marked by hev (mark 0x438 or 0x440). This means
+///   if hev dies and the TPROXY redirect stops working, unredirected packets
+///   hit FAILSAFE and are dropped — the VPS IP is never exposed.
+///   ICMP is also dropped so pings cannot reveal the VPS IP when hev is down.
+///
+/// Layer 3 — Watchdog wrapper:
+///   hev runs inside a loop. If it exits for any reason, the wrapper
+///   immediately reinstalls NEOX_GUARD (blocking all traffic) before sleeping
+///   and letting Podman's restart policy bring the container up again.
+///   Podman restart policy: on-failure with restart_tries=10.
+///
+/// Layer 4 — Proxy-host exclusion:
+///   The IP of the upstream SOCKS5 proxy is always excluded from redirection
+///   so hev itself can reach the proxy server directly.
+///
+/// # Race condition fix (startup ordering):
+///   The sidecar container is started BEFORE pod.start() is called.
+///   This ensures NEOX_GUARD is active in the shared pod network namespace
+///   before any main container begins sending traffic.
 fn build_tproxy_script(
     proxy_host: &str,
     proxy_port: &str,
@@ -70,26 +84,46 @@ fn build_tproxy_script(
     dns_server: &str,
     log_level: &str,
 ) -> String {
-    format!(r#"
+    format!(r#"#!/bin/sh
 set -e
 
-# ── OPTION C: Drop-all gap protection ────────────────────────────────────────
-# Block ALL non-loopback traffic immediately so no packets escape while we
-# tear down the old sidecar rules and set up the new ones.
-iptables -t mangle -N NEOX_GUARD 2>/dev/null || true
-iptables -t mangle -F NEOX_GUARD
-iptables -t mangle -A NEOX_GUARD -i lo -j RETURN
-iptables -t mangle -A NEOX_GUARD -j DROP
-# Insert at position 1 to take priority over any stale rules
-iptables -t mangle -I PREROUTING 1 -j NEOX_GUARD
-iptables -t mangle -I OUTPUT 1 -j NEOX_GUARD
+# ════════════════════════════════════════════════════════════════════════════
+# NEOX_GUARD — Layer 1: DROP-all gap protection
+# Runs on EVERY start/restart before anything else so no traffic escapes
+# while hev is not yet intercepting.
+# ════════════════════════════════════════════════════════════════════════════
+install_neox_guard() {{
+  iptables -t mangle -N NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -F NEOX_GUARD
+  iptables -t mangle -A NEOX_GUARD -i lo -j RETURN
+  iptables -t mangle -A NEOX_GUARD -j DROP
+  # Insert at position 1 so it runs before any other rule
+  iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -I PREROUTING 1 -j NEOX_GUARD
+  iptables -t mangle -I OUTPUT     1 -j NEOX_GUARD
+}}
 
-# ── Pre-requisites ────────────────────────────────────────────────────────────
+remove_neox_guard() {{
+  iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -F NEOX_GUARD 2>/dev/null || true
+  iptables -t mangle -X NEOX_GUARD 2>/dev/null || true
+}}
+
+# Block everything immediately
+install_neox_guard
+
+# ════════════════════════════════════════════════════════════════════════════
+# Pre-requisites
+# ════════════════════════════════════════════════════════════════════════════
 if ! command -v iptables >/dev/null 2>&1; then
   apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
 fi
 
-# ── hev-socks5-tproxy config ──────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# hev-socks5-tproxy config
+# ════════════════════════════════════════════════════════════════════════════
 mkdir -p /etc/hev
 cat > /etc/hev/tproxy.yml << 'HEVEOF'
 main:
@@ -119,60 +153,115 @@ misc:
   log-level: {log_level}
 HEVEOF
 
-# ── DNS redirect ──────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# DNS redirect
+# ════════════════════════════════════════════════════════════════════════════
 iptables -t nat -N HEV_DNS 2>/dev/null || true
 iptables -t nat -F HEV_DNS
 iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
 iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -D PREROUTING -j HEV_DNS 2>/dev/null || true
+iptables -t nat -D OUTPUT     -j HEV_DNS 2>/dev/null || true
 iptables -t nat -A PREROUTING -j HEV_DNS
-iptables -t nat -A OUTPUT -j HEV_DNS
+iptables -t nat -A OUTPUT     -j HEV_DNS
 
-# ── TPROXY rules ──────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# TPROXY redirect rules
+# ════════════════════════════════════════════════════════════════════════════
 iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
 iptables -t mangle -F HEV_TPROXY
 iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8    -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8   -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8  -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8     -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8    -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8   -j RETURN
 iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12  -j RETURN
 iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4  -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4  -j RETURN
-iptables -t mangle -A HEV_TPROXY -d {proxy_host}  -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4   -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4   -j RETURN
+iptables -t mangle -A HEV_TPROXY -d {proxy_host}   -j RETURN
 iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
 iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -D PREROUTING -j HEV_TPROXY 2>/dev/null || true
 iptables -t mangle -A PREROUTING -j HEV_TPROXY
 
 iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
 iptables -t mangle -F HEV_OUTPUT
 iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8    -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8   -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8     -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8    -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8   -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12  -j RETURN
 iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4  -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4  -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d {proxy_host}  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4   -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4   -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d {proxy_host}   -j RETURN
 iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
 iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
+iptables -t mangle -D OUTPUT -j HEV_OUTPUT 2>/dev/null || true
 iptables -t mangle -A OUTPUT -j HEV_OUTPUT
 
-# ── Policy routing ────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# Layer 2 — HEV_FAILSAFE: permanent kill-switch
+# Any packet that was NOT marked by hev (0x438 = hev internal, 0x440 = tproxy)
+# and is NOT loopback or private gets DROPPED here. This is the last line of
+# defense if hev dies and the TPROXY redirect stops working.
+# ICMP is also dropped to prevent VPS IP discovery via ping when hev is down.
+# ════════════════════════════════════════════════════════════════════════════
+iptables -t mangle -N HEV_FAILSAFE 2>/dev/null || true
+iptables -t mangle -F HEV_FAILSAFE
+# Allow hev's own marked packets
+iptables -t mangle -A HEV_FAILSAFE -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -m mark --mark 0x440 -j RETURN
+# Allow loopback and RFC-1918 / special ranges (intra-pod comms)
+iptables -t mangle -A HEV_FAILSAFE -d 0.0.0.0/8     -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 10.0.0.0/8    -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 127.0.0.0/8   -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 172.16.0.0/12  -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 224.0.0.0/4   -j RETURN
+iptables -t mangle -A HEV_FAILSAFE -d 240.0.0.0/4   -j RETURN
+# Allow outbound to the proxy server itself (hev needs to reach it directly)
+iptables -t mangle -A HEV_FAILSAFE -d {proxy_host}   -j RETURN
+# DROP everything else — tcp, udp AND icmp — if hev is dead, nothing leaks
+iptables -t mangle -A HEV_FAILSAFE -p tcp  -j DROP
+iptables -t mangle -A HEV_FAILSAFE -p udp  -j DROP
+iptables -t mangle -A HEV_FAILSAFE -p icmp -j DROP
+# Attach AFTER HEV_TPROXY/HEV_OUTPUT so normal hev traffic is never blocked
+iptables -t mangle -D PREROUTING -j HEV_FAILSAFE 2>/dev/null || true
+iptables -t mangle -D OUTPUT     -j HEV_FAILSAFE 2>/dev/null || true
+iptables -t mangle -A PREROUTING -j HEV_FAILSAFE
+iptables -t mangle -A OUTPUT     -j HEV_FAILSAFE
+
+# ════════════════════════════════════════════════════════════════════════════
+# Policy routing
+# ════════════════════════════════════════════════════════════════════════════
 ip rule add fwmark 0x440 table 100 2>/dev/null || true
 ip route add local default dev lo table 100 2>/dev/null || true
 
-# ── OPTION C: Lift drop-all guard — hev is about to take over ─────────────────
-# All TPROXY rules are now in place. Remove the guard so hev can intercept.
-iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
-iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
-iptables -t mangle -F NEOX_GUARD 2>/dev/null || true
-iptables -t mangle -X NEOX_GUARD 2>/dev/null || true
+# ════════════════════════════════════════════════════════════════════════════
+# Lift NEOX_GUARD — hev_FAILSAFE is now the permanent safety net
+# ════════════════════════════════════════════════════════════════════════════
+remove_neox_guard
 
-echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
-exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
+echo "[neox-tproxy] iptables rules installed. FAILSAFE active (tcp+udp+icmp). Starting hev..."
+
+# ════════════════════════════════════════════════════════════════════════════
+# Layer 3 — Watchdog wrapper
+# If hev exits for ANY reason, reinstall NEOX_GUARD immediately so no traffic
+# can escape before Podman's restart policy brings the container back up.
+# The container exits with code 1 so Podman (restart: on-failure) retries.
+# ════════════════════════════════════════════════════════════════════════════
+/usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
+EXIT_CODE=$?
+
+echo "[neox-tproxy] hev-socks5-tproxy exited with code $EXIT_CODE — reinstalling NEOX_GUARD"
+install_neox_guard
+
+echo "[neox-tproxy] NEOX_GUARD active. Exiting with code 1 to trigger Podman restart."
+exit 1
 "#,
         proxy_port = proxy_port,
         proxy_host = proxy_host,
@@ -182,46 +271,19 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
     )
 }
 
-/// Parses a socks5://[user:pass@]host:port URL into its components.
-fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String, String) {
-    let url_str = socks5_url.trim_start_matches("socks5://");
-    let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
-        (Some(auth), rest)
-    } else {
-        (None, url_str)
-    };
-    let (proxy_host, proxy_port) = match host_part.split_once(':') {
-        Some((h, p)) => (h.to_string(), p.to_string()),
-        None => (host_part.to_string(), "1080".to_string()),
-    };
-    let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
-        match auth.split_once(':') {
-            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
-            None => (Some(auth.to_string()), None),
-        }
-    } else {
-        (None, None)
-    };
-    (proxy_user, proxy_pass, proxy_host, proxy_port)
-}
-
 /// Writes neox.proxy.url label to the pod via `podman pod label`.
-/// This is the Opción B persistence mechanism.
 fn set_pod_proxy_label(pod_name: &str, socks5_url: &str) {
     let label = format!("neox.proxy.url={}", socks5_url);
-    let result = std::process::Command::new("podman")
+    match std::process::Command::new("podman")
         .args(["pod", "label", pod_name, &label])
-        .output();
-    match result {
+        .output()
+    {
         Ok(o) if o.status.success() => {
-            tracing::info!("✅ Set neox.proxy.url label on pod '{}'", pod_name);
+            tracing::info!("✅ Set neox.proxy.url on pod '{}'", pod_name);
         }
         Ok(o) => {
-            tracing::warn!(
-                "⚠️ podman pod label failed for '{}': {}",
-                pod_name,
-                String::from_utf8_lossy(&o.stderr)
-            );
+            tracing::warn!("⚠️ podman pod label failed for '{}': {}",
+                pod_name, String::from_utf8_lossy(&o.stderr));
         }
         Err(e) => {
             tracing::warn!("⚠️ Failed to execute podman pod label: {}", e);
@@ -231,19 +293,48 @@ fn set_pod_proxy_label(pod_name: &str, socks5_url: &str) {
 
 /// Removes neox.proxy.url label from the pod.
 fn remove_pod_proxy_label(pod_name: &str) {
-    let result = std::process::Command::new("podman")
+    let _ = std::process::Command::new("podman")
         .args(["pod", "label", "--delete", "neox.proxy.url", pod_name])
         .output();
-    if let Err(e) = result {
-        tracing::warn!("⚠️ Failed to remove neox.proxy.url label from pod '{}': {}", pod_name, e);
+}
+
+fn extract_containers(
+    ctrs: &Option<Vec<InspectPodContainerInfo>>,
+) -> Vec<PodContainerInfo> {
+    ctrs.as_ref()
+        .map(|arr| {
+            arr.iter().map(|c| PodContainerInfo {
+                id: c.id.clone().unwrap_or_default(),
+                name: c.name.clone().unwrap_or_default(),
+                status: c.state.clone().unwrap_or_else(|| "unknown".to_string()),
+            }).collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_pod_response(
+    inspect: &InspectPodData,
+    proxy_enabled: bool,
+    proxy_url: Option<String>,
+) -> PodResponse {
+    PodResponse {
+        id: inspect.id.clone().unwrap_or_default(),
+        name: inspect.name.clone().unwrap_or_default(),
+        status: inspect.state.clone().unwrap_or_else(|| "unknown".to_string()),
+        created_at: inspect.created.map(|t| t.to_rfc3339()),
+        hostname: inspect.hostname.clone(),
+        labels: inspect.labels.clone().unwrap_or_default(),
+        containers: extract_containers(&inspect.containers),
+        proxy_enabled,
+        proxy_url,
+        infra_id: inspect.infra_container_id.clone(),
     }
 }
 
-// ─── List Pods ───────────────────────────────────────────────────────────────
+// ─── List Pods ────────────────────────────────────────────────────────────────
 
 /// GET /api/pods
-/// Lists all pods managed by Podman on this node.
-pub async fn list_pods_handler(
+pub async fn list_pods(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
     let pods = state.podman.pods()
@@ -251,29 +342,29 @@ pub async fn list_pods_handler(
         .await
         .map_err(|e| AppError::Podman(format!("Failed to list pods: {}", e)))?;
 
-    let summaries: Vec<PodSummary> = pods.iter().map(|p| {
-        PodSummary {
-            id: p.id.clone().unwrap_or_default(),
-            name: p.name.clone(),
-            status: p.status.clone(),
-            created: p.created.map(|t| t.to_rfc3339()),
-            num_containers: p.containers.as_ref().map(|c| c.len() as i64),
-            infra_id: p.infra_id.clone(),
-            labels: p.labels.clone(),
-        }
+    let summaries: Vec<PodSummary> = pods.iter().map(|p| PodSummary {
+        id: p.id.clone().unwrap_or_default(),
+        name: p.name.clone(),
+        status: p.status.clone(),
+        created: p.created.map(|t| t.to_rfc3339()),
+        num_containers: p.containers.as_ref().map(|c| c.len() as i64),
+        infra_id: p.infra_id.clone(),
+        labels: p.labels.clone(),
     }).collect();
 
     let total = summaries.len();
-
-    Ok(Json(json!({
-        "pods": summaries,
-        "total": total,
-    })))
+    Ok(Json(json!({ "pods": summaries, "total": total })))
 }
 
-// ─── Create Pod ──────────────────────────────────────────────────────────────
+// ─── Create Pod ───────────────────────────────────────────────────────────────
 
 /// POST /api/pods
+///
+/// # Startup ordering (race condition fix):
+///   When proxy is enabled, the sidecar container is started FIRST before
+///   pod.start() is called. Since all containers in a pod share the same
+///   network namespace, NEOX_GUARD is active in that namespace before any
+///   main container process can send a single packet.
 pub async fn create_pod(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePodRequest>,
@@ -281,7 +372,6 @@ pub async fn create_pod(
     if req.name.is_empty() {
         return Err(AppError::BadRequest("Pod name is required".into()));
     }
-
     tracing::info!("🏗️ Creating pod '{}'", req.name);
 
     let mut all_ports: Vec<PodmanPortMapping> = Vec::new();
@@ -300,70 +390,64 @@ pub async fn create_pod(
     let mut pod_builder = PodCreateOpts::builder()
         .name(&req.name)
         .labels(req.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-
-    if !all_ports.is_empty() {
-        pod_builder = pod_builder.portmappings(all_ports);
-    }
-    if let Some(hostname) = &req.hostname {
-        pod_builder = pod_builder.hostname(hostname.as_str());
-    }
+    if !all_ports.is_empty() { pod_builder = pod_builder.portmappings(all_ports); }
+    if let Some(h) = &req.hostname { pod_builder = pod_builder.hostname(h.as_str()); }
     if !req.dns_servers.is_empty() {
         pod_builder = pod_builder.dns_server(req.dns_servers.iter().map(|s| s.as_str()));
     }
 
-    let pod_opts = pod_builder.build();
-    let pod = state.podman.pods()
-        .create(&pod_opts)
-        .await
+    let pod = state.podman.pods().create(&pod_builder.build()).await
         .map_err(|e| AppError::Podman(format!("Failed to create pod '{}': {}", req.name, e)))?;
-
-    let pod_id = pod.id().to_string();
-    tracing::info!("✅ Pod '{}' created: {}", req.name, pod_id);
+    tracing::info!("✅ Pod '{}' created: {}", req.name, pod.id());
 
     let proxy_enabled = req.proxy.as_ref().map_or(false, |p| p.enabled);
+    let mut proxy_url_out: Option<String> = None;
+    let mut sidecar_id: Option<String> = None;
 
     if proxy_enabled {
         if let Some(proxy) = &req.proxy {
             let socks5_url = proxy.socks5_url.as_deref()
-                .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
+                .ok_or_else(|| AppError::BadRequest(
+                    "socks5_url is required when proxy is enabled".into()))?;
 
             let (proxy_user, proxy_pass, proxy_host, proxy_port) = parse_socks5_url(socks5_url);
-
             let proxy_image = proxy.image.as_deref()
                 .unwrap_or("localhost/neox-tproxy-sidecar:latest");
-            let log_level = proxy.loglevel.as_deref().unwrap_or("warn");
+            let log_level  = proxy.loglevel.as_deref().unwrap_or("warn");
             let dns_server = proxy.dns.as_deref().unwrap_or("8.8.8.8");
-
             let sidecar_name = format!("{}-hev-tproxy", req.name);
 
-            tracing::info!(
-                "🔌 Creating hev-socks5-tproxy sidecar '{}' → {}:{} (auth: {})",
+            tracing::info!("🔌 Creating sidecar '{}' → {}:{} (auth: {})",
                 sidecar_name, proxy_host, proxy_port,
-                if proxy_user.is_some() { "yes" } else { "no" }
-            );
+                if proxy_user.is_some() { "yes" } else { "no" });
 
             let auth_yaml = match (&proxy_user, &proxy_pass) {
-                (Some(user), Some(pass)) => format!("  username: '{}'\n  password: '{}'", user, pass),
+                (Some(u), Some(p)) =>
+                    format!("  username: '{}'\n  password: '{}'", u, p),
                 _ => String::new(),
             };
 
-            let script = build_tproxy_script(&proxy_host, &proxy_port, &auth_yaml, dns_server, log_level);
+            let script = build_tproxy_script(
+                &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level,
+            );
 
             let sidecar_opts = ContainerCreateOpts::builder()
                 .name(&sidecar_name)
                 .image(proxy_image)
                 .pod(req.name.as_str())
                 .privileged(true)
-                .mounts(vec![
-                    ContainerMount {
-                        destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
-                        source: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
-                        _type: Some("bind".to_string()),
-                        options: Some(vec!["ro".to_string()]),
-                        uid_mappings: None,
-                        gid_mappings: None,
-                    }
-                ])
+                // restart_policy: OnFailure (unit variant) + restart_tries: 10
+                // Each restart re-runs the full script, reinstalling NEOX_GUARD first.
+                .restart_policy(ContainerRestartPolicy::OnFailure)
+                .restart_tries(10)
+                .mounts(vec![ContainerMount {
+                    destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+                    source:      Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+                    _type:       Some("bind".to_string()),
+                    options:     Some(vec!["ro".to_string()]),
+                    uid_mappings: None,
+                    gid_mappings: None,
+                }])
                 .command(["sh", "-c", &script])
                 .labels([
                     ("neox.role", "proxy-sidecar"),
@@ -372,17 +456,24 @@ pub async fn create_pod(
                 ])
                 .build();
 
-            state.podman.containers()
-                .create(&sidecar_opts)
-                .await
+            let created_sidecar = state.podman.containers().create(&sidecar_opts).await
                 .map_err(|e| AppError::Podman(format!(
-                    "Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e
-                )))?;
+                    "Failed to create sidecar '{}': {}", sidecar_name, e)))?;
 
-            tracing::info!("✅ hev-socks5-tproxy sidecar '{}' created", sidecar_name);
+            // ── Race condition fix ────────────────────────────────────────────
+            // Start the sidecar BEFORE pod.start() so NEOX_GUARD is installed
+            // in the shared pod network namespace before any main container
+            // can send traffic. All containers in a pod share one netns, so
+            // iptables rules written by the sidecar protect all of them.
+            state.podman.containers().get(&created_sidecar.id).start(None).await
+                .map_err(|e| AppError::Podman(format!(
+                    "Failed to start sidecar '{}': {}", sidecar_name, e)))?;
+            tracing::info!("✅ Sidecar '{}' started first — NEOX_GUARD active",
+                sidecar_name);
 
-            // Opción B: persist proxy URL as pod label
+            sidecar_id = Some(created_sidecar.id);
             set_pod_proxy_label(&req.name, socks5_url);
+            proxy_url_out = Some(socks5_url.to_string());
         }
     }
 
@@ -391,21 +482,16 @@ pub async fn create_pod(
             return Err(AppError::BadRequest("Container name is required".into()));
         }
         if ctr_spec.image.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "Image is required for container '{}'", ctr_spec.name
-            )));
+            return Err(AppError::BadRequest(
+                format!("Image is required for '{}'", ctr_spec.name)));
         }
-
         let ctr_name = ctr_spec.name.clone();
         tracing::info!("📦 Creating container '{}' in pod '{}'", ctr_name, req.name);
 
-        let env_refs: HashMap<&str, &str> = ctr_spec.env.iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-
-        let mut label_map: HashMap<&str, &str> = ctr_spec.labels.iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        let env_refs: HashMap<&str, &str> =
+            ctr_spec.env.iter().map(|(k,v)| (k.as_str(), v.as_str())).collect();
+        let mut label_map: HashMap<&str, &str> =
+            ctr_spec.labels.iter().map(|(k,v)| (k.as_str(), v.as_str())).collect();
         label_map.insert("neox.role", "main");
         label_map.insert("neox.pod", req.name.as_str());
 
@@ -418,117 +504,82 @@ pub async fn create_pod(
 
         if let Some(limits) = &ctr_spec.limits {
             if let Some(mem) = limits.memory_mb {
-                let mem_bytes = (mem * 1024 * 1024) as i64;
-                ctr_builder = ctr_builder.resource_limits(
-                    LinuxResources {
-                        memory: Some(LinuxMemory {
-                            limit: Some(mem_bytes),
-                            reservation: None,
-                            swap: None,
-                            kernel: None,
-                            kernel_tcp: None,
-                            swappiness: None,
-                            disable_oom_killer: None,
-                            use_hierarchy: None,
-                        }),
-                        cpu: None,
-                        pids: None,
-                        block_io: None,
-                        hugepage_limits: None,
-                        network: None,
-                        devices: None,
-                        rdma: None,
-                        unified: None,
-                    }
-                );
+                ctr_builder = ctr_builder.resource_limits(LinuxResources {
+                    memory: Some(LinuxMemory {
+                        limit: Some((mem * 1024 * 1024) as i64),
+                        reservation: None, swap: None, kernel: None, kernel_tcp: None,
+                        swappiness: None, disable_oom_killer: None, use_hierarchy: None,
+                    }),
+                    cpu: None, pids: None, block_io: None, hugepage_limits: None,
+                    network: None, devices: None, rdma: None, unified: None,
+                });
             }
         }
-
         for vol in &ctr_spec.volumes {
-            ctr_builder = ctr_builder.mounts([
-                ContainerMount {
-                    destination: Some(vol.container_path.clone()),
-                    source: Some(vol.host_path.clone()),
-                    _type: Some("bind".to_string()),
-                    options: Some(vec!["rbind".to_string()]),
-                    uid_mappings: None,
-                    gid_mappings: None,
-                }
-            ]);
+            ctr_builder = ctr_builder.mounts([ContainerMount {
+                destination: Some(vol.container_path.clone()),
+                source:      Some(vol.host_path.clone()),
+                _type:       Some("bind".to_string()),
+                options:     Some(vec!["rbind".to_string()]),
+                uid_mappings: None, gid_mappings: None,
+            }]);
         }
-
-        if let Some(ref entrypoint) = ctr_spec.entrypoint {
-            if !entrypoint.is_empty() {
-                ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+        if let Some(ref ep) = ctr_spec.entrypoint {
+            if !ep.is_empty() {
+                ctr_builder = ctr_builder.entrypoint(ep.iter().map(|s| s.as_str()));
             }
         }
-
         if !ctr_spec.command.is_empty() {
             ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
         }
 
-        let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
-        let ctr_opts = ctr_builder.name(&temp_name).build();
-
+        let temp_name = format!("{}-tmp-{}",
+            ctr_name, &uuid::Uuid::new_v4().to_string()[..8]);
         let created = state.podman.containers()
-            .create(&ctr_opts)
+            .create(&ctr_builder.name(&temp_name).build())
             .await
-            .map_err(|e| AppError::Podman(format!(
-                "Failed to create container '{}' in pod '{}': {}", ctr_name, req.name, e
-            )))?;
+            .map_err(|e| AppError::Podman(
+                format!("Failed to create container '{}': {}", ctr_name, e)))?;
 
-        let short_id = &created.id[..12];
-        let final_name = format!("{}-{}", ctr_name, short_id);
+        let final_name = format!("{}-{}", ctr_name, &created.id[..12]);
         state.podman.containers().get(&created.id).rename(&final_name).await
-            .map_err(|e| AppError::Internal(format!("Failed to rename container: {}", e)))?;
-
-        tracing::info!("✅ Container '{}' created in pod '{}'", ctr_name, req.name);
+            .map_err(|e| AppError::Internal(
+                format!("Failed to rename container: {}", e)))?;
+        tracing::info!("✅ Container '{}' created", ctr_name);
     }
 
+    // Start the pod (and remaining containers). Sidecar already running.
     tracing::info!("🚀 Starting pod '{}'", req.name);
-    pod.start()
-        .await
-        .map_err(|e| AppError::Podman(format!("Failed to start pod '{}': {}", req.name, e)))?;
-    tracing::info!("✅ Pod '{}' started successfully", req.name);
+    pod.start().await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to start pod '{}': {}", req.name, e)))?;
+    tracing::info!("✅ Pod '{}' started (sidecar pre-started: {})",
+        req.name, sidecar_id.is_some());
 
-    let inspect = pod.inspect()
-        .await
+    let inspect = pod.inspect().await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod: {}", e)))?;
-
-    // Read back the label we just set so the response is accurate
-    let proxy_url = if proxy_enabled {
-        req.proxy.as_ref().and_then(|p| p.socks5_url.clone())
-    } else {
-        None
-    };
-
-    let response = build_pod_response(&inspect, proxy_enabled, proxy_url);
+    let response = build_pod_response(&inspect, proxy_enabled, proxy_url_out);
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
 
-// ─── Inspect Pod ─────────────────────────────────────────────────────────────
+// ─── Get Pod ──────────────────────────────────────────────────────────────────
 
 /// GET /api/pods/:id
 pub async fn get_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let pod = state.podman.pods().get(&id);
-
-    let inspect = pod.inspect()
-        .await
-        .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
+    let inspect = state.podman.pods().get(&id).inspect().await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to inspect pod '{}': {}", id, e)))?;
 
     let proxy_enabled = inspect.containers.as_ref()
-        .map(|ctrs| {
-            ctrs.iter().any(|c| {
-                let name = c.name.as_deref().unwrap_or("");
-                name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks")
-            })
-        })
+        .map(|ctrs| ctrs.iter().any(|c| {
+            let name = c.name.as_deref().unwrap_or("");
+            name.contains("hev-tproxy")
+        }))
         .unwrap_or(false);
 
-    // Opción B: read proxy URL from pod label
     let proxy_url = inspect.labels
         .as_ref()
         .and_then(|l| l.get("neox.proxy.url"))
@@ -538,7 +589,7 @@ pub async fn get_pod(
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
 
-// ─── Delete Pod ──────────────────────────────────────────────────────────────
+// ─── Delete Pod ───────────────────────────────────────────────────────────────
 
 /// DELETE /api/pods/:id
 pub async fn delete_pod(
@@ -550,93 +601,84 @@ pub async fn delete_pod(
     let pod = state.podman.pods().get(&id);
     if query.force {
         pod.remove().await
-            .map_err(|e| AppError::Podman(format!("Failed to force-remove pod '{}': {}", id, e)))?;
+            .map_err(|e| AppError::Podman(
+                format!("Failed to force-remove pod '{}': {}", id, e)))?;
     } else {
         pod.delete().await
-            .map_err(|e| AppError::Podman(format!("Failed to delete pod '{}': {}", id, e)))?;
+            .map_err(|e| AppError::Podman(
+                format!("Failed to delete pod '{}': {}", id, e)))?;
     }
     tracing::info!("✅ Pod '{}' deleted", id);
     Ok(Json(json!({
         "success": true,
-        "message": format!("Pod '{}' deleted successfully", id),
+        "message": format!("Pod '{}' deleted", id),
         "pod_id": id,
     })))
 }
 
-// ─── Start Pod ───────────────────────────────────────────────────────────────
+// ─── Start / Stop / Restart ───────────────────────────────────────────────────
 
 /// POST /api/pods/:id/start
 pub async fn start_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("▶️ Starting pod '{}'", id);
     state.podman.pods().get(&id).start().await
-        .map_err(|e| AppError::Podman(format!("Failed to start pod '{}': {}", id, e)))?;
-    tracing::info!("✅ Pod '{}' started", id);
+        .map_err(|e| AppError::Podman(
+            format!("Failed to start pod '{}': {}", id, e)))?;
     Ok(Json(json!({
         "success": true,
-        "message": format!("Pod '{}' started successfully", id),
+        "message": format!("Pod '{}' started", id),
         "pod_id": id,
     })))
 }
-
-// ─── Stop Pod ────────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/stop
 pub async fn stop_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("⏹️ Stopping pod '{}'", id);
     state.podman.pods().get(&id).stop().await
-        .map_err(|e| AppError::Podman(format!("Failed to stop pod '{}': {}", id, e)))?;
-    tracing::info!("✅ Pod '{}' stopped", id);
+        .map_err(|e| AppError::Podman(
+            format!("Failed to stop pod '{}': {}", id, e)))?;
     Ok(Json(json!({
         "success": true,
-        "message": format!("Pod '{}' stopped successfully", id),
+        "message": format!("Pod '{}' stopped", id),
         "pod_id": id,
     })))
 }
-
-// ─── Restart Pod ─────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/restart
 pub async fn restart_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("🔄 Restarting pod '{}'", id);
     state.podman.pods().get(&id).restart().await
-        .map_err(|e| AppError::Podman(format!("Failed to restart pod '{}': {}", id, e)))?;
-    tracing::info!("✅ Pod '{}' restarted", id);
+        .map_err(|e| AppError::Podman(
+            format!("Failed to restart pod '{}': {}", id, e)))?;
     Ok(Json(json!({
         "success": true,
-        "message": format!("Pod '{}' restarted successfully", id),
+        "message": format!("Pod '{}' restarted", id),
         "pod_id": id,
     })))
 }
 
-// ─── List Pod Containers ─────────────────────────────────────────────────────
+// ─── List Pod Containers ──────────────────────────────────────────────────────
 
 /// GET /api/pods/:id/containers
 pub async fn list_pod_containers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let pod = state.podman.pods().get(&id);
-    let inspect = pod.inspect().await
-        .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
+    let inspect = state.podman.pods().get(&id).inspect().await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to inspect pod '{}': {}", id, e)))?;
     let containers = extract_containers(&inspect.containers);
     let total = containers.len();
-    Ok(Json(json!({
-        "pod_id": id,
-        "containers": containers,
-        "total": total,
-    })))
+    Ok(Json(json!({ "pod_id": id, "containers": containers, "total": total })))
 }
 
-// ─── Add Container to Pod ────────────────────────────────────────────────────
+// ─── Add Container to Pod ─────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/containers
 pub async fn add_container_to_pod(
@@ -653,15 +695,10 @@ pub async fn add_container_to_pod(
     }
 
     let ctr_name = ctr.name.clone();
-    tracing::info!("📦 Adding container '{}' to pod '{}'", ctr_name, id);
-
-    let env_refs: HashMap<&str, &str> = ctr.env.iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let mut label_map: HashMap<&str, &str> = ctr.labels.iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let env_refs: HashMap<&str, &str> =
+        ctr.env.iter().map(|(k,v)| (k.as_str(), v.as_str())).collect();
+    let mut label_map: HashMap<&str, &str> =
+        ctr.labels.iter().map(|(k,v)| (k.as_str(), v.as_str())).collect();
     label_map.insert("neox.role", "main");
     label_map.insert("neox.pod", &id);
 
@@ -671,51 +708,39 @@ pub async fn add_container_to_pod(
         .env(env_refs)
         .pod(id.as_str())
         .labels(label_map);
-
     for vol in &ctr.volumes {
-        ctr_builder = ctr_builder.mounts([
-            ContainerMount {
-                destination: Some(vol.container_path.clone()),
-                source: Some(vol.host_path.clone()),
-                _type: Some("bind".to_string()),
-                options: Some(vec!["rbind".to_string()]),
-                uid_mappings: None,
-                gid_mappings: None,
-            }
-        ]);
+        ctr_builder = ctr_builder.mounts([ContainerMount {
+            destination: Some(vol.container_path.clone()),
+            source:      Some(vol.host_path.clone()),
+            _type:       Some("bind".to_string()),
+            options:     Some(vec!["rbind".to_string()]),
+            uid_mappings: None, gid_mappings: None,
+        }]);
     }
-
-    if let Some(ref entrypoint) = ctr.entrypoint {
-        if !entrypoint.is_empty() {
-            ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+    if let Some(ref ep) = ctr.entrypoint {
+        if !ep.is_empty() {
+            ctr_builder = ctr_builder.entrypoint(ep.iter().map(|s| s.as_str()));
         }
     }
     if !ctr.command.is_empty() {
         ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
     }
 
-    let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
-    let ctr_opts = ctr_builder.name(&temp_name).build();
-
+    let temp_name = format!("{}-tmp-{}",
+        ctr_name, &uuid::Uuid::new_v4().to_string()[..8]);
     let created = state.podman.containers()
-        .create(&ctr_opts)
+        .create(&ctr_builder.name(&temp_name).build())
         .await
-        .map_err(|e| AppError::Podman(format!(
-            "Failed to create container '{}' in pod '{}': {}", ctr_name, id, e
-        )))?;
-
-    let short_id = &created.id[..12];
-    let final_name = format!("{}-{}", ctr_name, short_id);
+        .map_err(|e| AppError::Podman(
+            format!("Failed to create container '{}': {}", ctr_name, e)))?;
+    let final_name = format!("{}-{}", ctr_name, &created.id[..12]);
     state.podman.containers().get(&created.id).rename(&final_name).await
         .map_err(|e| AppError::Internal(format!("Failed to rename container: {}", e)))?;
 
     let container_id = created.id.clone();
-    tracing::info!("✅ Container '{}' added to pod '{}' (id: {})", ctr_name, id, container_id);
-
-    state.podman.containers().get(&container_id)
-        .start(None)
-        .await
-        .map_err(|e| AppError::Podman(format!("Failed to start container '{}': {}", ctr_name, e)))?;
+    state.podman.containers().get(&container_id).start(None).await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to start container '{}': {}", ctr_name, e)))?;
 
     Ok(Json(json!({
         "success": true,
@@ -726,7 +751,7 @@ pub async fn add_container_to_pod(
     })))
 }
 
-// ─── Generate Kube YAML ──────────────────────────────────────────────────────
+// ─── Generate Kube YAML ───────────────────────────────────────────────────────
 
 /// GET /api/pods/:id/kube
 pub async fn generate_kube_yaml(
@@ -734,12 +759,9 @@ pub async fn generate_kube_yaml(
     Path(id): Path<String>,
     Query(query): Query<GenerateKubeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("📄 Generating Kube YAML for pod '{}'", id);
-    let pod = state.podman.pods().get(&id);
-    let yaml = pod.generate_kube_yaml(query.service).await
-        .map_err(|e| AppError::Podman(format!(
-            "Failed to generate Kube YAML for pod '{}': {}", id, e
-        )))?;
+    let yaml = state.podman.pods().get(&id).generate_kube_yaml(query.service).await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to generate Kube YAML for '{}': {}", id, e)))?;
     Ok(Json(json!({
         "pod_id": id,
         "yaml": yaml,
@@ -756,7 +778,7 @@ pub async fn get_pod_logs(
     crate::services::podman::get_pod_logs(&state, &id, query.tail).await
 }
 
-// ─── Rename Pod ─────────────────────────────────────────────────────────────
+// ─── Rename Pod ───────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/rename
 pub async fn rename_pod(
@@ -767,14 +789,14 @@ pub async fn rename_pod(
     if req.name.is_empty() {
         return Err(AppError::BadRequest("New pod name is required".into()));
     }
-    tracing::info!("🏷️ Renaming pod '{}' to '{}'", id, req.name);
     let output = std::process::Command::new("podman")
         .args(["pod", "rename", &id, &req.name])
         .output()
-        .map_err(|e| AppError::Internal(format!("Failed to execute podman pod rename: {}", e)))?;
+        .map_err(|e| AppError::Internal(
+            format!("Failed to execute podman pod rename: {}", e)))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Podman(format!("podman pod rename failed: {}", stderr)));
+        return Err(AppError::Podman(format!("podman pod rename failed: {}",
+            String::from_utf8_lossy(&output.stderr))));
     }
     Ok(Json(json!({
         "success": true,
@@ -784,9 +806,19 @@ pub async fn rename_pod(
     })))
 }
 
-// ─── Update Proxy ───────────────────────────────────────────────────────────
+// ─── Update Proxy ─────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/proxy
+///
+/// Security sequence when changing proxy:
+///   1. Inspect pod to find existing sidecar(s).
+///   2. Force-delete old sidecar — its iptables rules stay in the kernel
+///      (HEV_TPROXY still redirects, but nobody listens → packets dropped).
+///   3. Create AND START new sidecar first — script installs NEOX_GUARD
+///      immediately, so there is no gap between old sidecar death and new
+///      sidecar taking over.
+///   4. pod.start() / running containers continue under new proxy rules.
+///   At no point does unproxied traffic reach the internet.
 pub async fn update_proxy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -794,18 +826,17 @@ pub async fn update_proxy(
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("🔌 Updating proxy for pod '{}'. enabled: {}", id, req.proxy.enabled);
 
-    let pod = state.podman.pods().get(&id);
-    let inspect = pod.inspect().await
-        .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
-
+    let inspect = state.podman.pods().get(&id).inspect().await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to inspect pod '{}': {}", id, e)))?;
     let pod_name = inspect.name.clone().unwrap_or_else(|| id.clone());
 
-    // 1. Find and force-delete existing proxy sidecar(s)
+    // 1. Remove existing proxy sidecar(s)
     if let Some(ctrs) = &inspect.containers {
         for c in ctrs {
             let name = c.name.as_deref().unwrap_or("");
-            if name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks") {
-                tracing::info!("🗑️ Removing existing proxy sidecar: {}", name);
+            if name.contains("hev-tproxy") {
+                tracing::info!("🗑️ Removing sidecar: {}", name);
                 let ctr_id = c.id.clone().unwrap_or_default();
                 let _ = state.podman.containers().get(&ctr_id)
                     .delete(&ContainerDeleteOpts::builder().force(true).build())
@@ -814,7 +845,7 @@ pub async fn update_proxy(
         }
     }
 
-    // 2. If proxy disabled → remove label and return
+    // 2. If disabling proxy — remove label and return
     if !req.proxy.enabled {
         remove_pod_proxy_label(&pod_name);
         return Ok(Json(json!({
@@ -823,42 +854,46 @@ pub async fn update_proxy(
         })));
     }
 
-    // 3. Create new sidecar with Opción C drop-all guard in script
+    // 3. Build and start new sidecar
     let socks5_url = req.proxy.socks5_url.as_deref()
-        .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
+        .ok_or_else(|| AppError::BadRequest(
+            "socks5_url is required when proxy is enabled".into()))?;
 
     let (proxy_user, proxy_pass, proxy_host, proxy_port) = parse_socks5_url(socks5_url);
-
     let proxy_image = req.proxy.image.as_deref()
         .unwrap_or("localhost/neox-tproxy-sidecar:latest");
-    let log_level = req.proxy.loglevel.as_deref().unwrap_or("warn");
+    let log_level  = req.proxy.loglevel.as_deref().unwrap_or("warn");
     let dns_server = req.proxy.dns.as_deref().unwrap_or("8.8.8.8");
-
-    let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
-    let sidecar_name = format!("{}-hev-tproxy-{}", pod_name, short_uuid);
+    let sidecar_name = format!("{}-hev-tproxy-{}",
+        pod_name, &uuid::Uuid::new_v4().to_string()[..8]);
 
     let auth_yaml = match (&proxy_user, &proxy_pass) {
-        (Some(user), Some(pass)) => format!("  username: '{}'\n  password: '{}'", user, pass),
+        (Some(u), Some(p)) =>
+            format!("  username: '{}'\n  password: '{}'", u, p),
         _ => String::new(),
     };
 
-    let script = build_tproxy_script(&proxy_host, &proxy_port, &auth_yaml, dns_server, log_level);
+    let script = build_tproxy_script(
+        &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level,
+    );
 
     let sidecar_opts = ContainerCreateOpts::builder()
         .name(&sidecar_name)
         .image(proxy_image)
         .pod(pod_name.as_str())
         .privileged(true)
-        .mounts(vec![
-            ContainerMount {
-                destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
-                source: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
-                _type: Some("bind".to_string()),
-                options: Some(vec!["ro".to_string()]),
-                uid_mappings: None,
-                gid_mappings: None,
-            }
-        ])
+        // restart_policy: OnFailure (unit variant) + restart_tries: 10
+        // Each restart reinstalls NEOX_GUARD before lifting it again.
+        .restart_policy(ContainerRestartPolicy::OnFailure)
+        .restart_tries(10)
+        .mounts(vec![ContainerMount {
+            destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+            source:      Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+            _type:       Some("bind".to_string()),
+            options:     Some(vec!["ro".to_string()]),
+            uid_mappings: None,
+            gid_mappings: None,
+        }])
         .command(["sh", "-c", &script])
         .labels([
             ("neox.role", "proxy-sidecar"),
@@ -867,66 +902,25 @@ pub async fn update_proxy(
         ])
         .build();
 
-    let created = state.podman.containers()
-        .create(&sidecar_opts)
-        .await
-        .map_err(|e| AppError::Podman(format!(
-            "Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e
-        )))?;
+    let created = state.podman.containers().create(&sidecar_opts).await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to create sidecar '{}': {}", sidecar_name, e)))?;
 
-    state.podman.containers().get(&created.id)
-        .start(None)
-        .await
-        .map_err(|e| AppError::Podman(format!("Failed to start sidecar '{}': {}", sidecar_name, e)))?;
+    // ── Race condition fix ────────────────────────────────────────────────────
+    // Start sidecar immediately after creation so NEOX_GUARD is installed
+    // in the pod netns before the old rules (from the deleted sidecar) can
+    // be cleared and before any main container sends unproxied traffic.
+    state.podman.containers().get(&created.id).start(None).await
+        .map_err(|e| AppError::Podman(
+            format!("Failed to start sidecar '{}': {}", sidecar_name, e)))?;
 
-    // Opción B: update proxy URL label on the pod
     set_pod_proxy_label(&pod_name, socks5_url);
 
-    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}'", id, sidecar_name);
-
+    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started",
+        id, sidecar_name);
     Ok(Json(json!({
         "success": true,
         "message": format!("Proxy updated for pod '{}'", id),
         "sidecar": sidecar_name,
     })))
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn extract_containers(
-    ctrs: &Option<Vec<InspectPodContainerInfo>>,
-) -> Vec<PodContainerInfo> {
-    ctrs.as_ref()
-        .map(|arr| {
-            arr.iter().map(|c| PodContainerInfo {
-                id: c.id.clone().unwrap_or_default(),
-                name: c.name.clone().unwrap_or_default(),
-                status: c.state.clone().unwrap_or_else(|| "unknown".to_string()),
-            }).collect()
-        })
-        .unwrap_or_default()
-}
-
-fn build_pod_response(inspect: &InspectPodData, proxy_enabled: bool, proxy_url: Option<String>) -> PodResponse {
-    let id = inspect.id.clone().unwrap_or_default();
-    let name = inspect.name.clone().unwrap_or_default();
-    let status = inspect.state.clone().unwrap_or_else(|| "unknown".to_string());
-    let created_at = inspect.created.map(|t| t.to_rfc3339());
-    let hostname = inspect.hostname.clone();
-    let labels = inspect.labels.clone().unwrap_or_default();
-    let infra_id = inspect.infra_container_id.clone();
-    let containers = extract_containers(&inspect.containers);
-
-    PodResponse {
-        id,
-        name,
-        status,
-        created_at,
-        hostname,
-        labels,
-        containers,
-        proxy_enabled,
-        proxy_url,
-        infra_id,
-    }
 }

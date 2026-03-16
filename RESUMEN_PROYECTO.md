@@ -3,11 +3,11 @@
 ## ¿Qué es neoxagent?
 **neoxagent** es un agente de nodo escrito en **Rust** diseñado para interactuar de forma nativa con **Podman**. Su objetivo principal es actuar como un reemplazo ligero, eficiente y seguro para *Pterodactyl Wings*, diseñado específicamente para integrarse con el panel *Jexactyl* (basado en Next.js).
 
-El agente está diseñado para ser **Daemonless** (sin procesos en segundo plano consumiendo memoria pasivamente) y **Rootless** (más seguro por diseño), administrando así servidores de juegos, aplicaciones en contenedores, redes con *tun2socks* (a través de Pods) y despliegues mediante *Kubernetes YAML*.
+El agente está diseñado para ser **Daemonless** (sin procesos en segundo plano consumiendo memoria pasivamente) y **Rootless** (más seguro por diseño), administrando así servidores de juegos, aplicaciones en contenedores, redes con *hev-socks5-tproxy* (a través de Pods) y despliegues mediante *Kubernetes YAML*.
 
 ## Características Principales
 *   **Podman Nativo:** Utiliza la SDK nativa (`podman-api`) para comunicarse con Podman, eliminando la necesidad de Docker y su daemon (`dockerd`).
-*   **Gestión de Pods y tun2socks:** Permite la creación de Pods que encapsulan contenedores (ej. un servidor de Minecraft junto a un sidecar de tun2socks) para compartir la misma red e IP, aislando y protegiendo el tráfico.
+*   **Gestión de Pods y hev-socks5-tproxy:** Permite la creación de Pods que encapsulan contenedores (ej. un servidor de Minecraft junto a un sidecar de hev-socks5-tproxy) para compartir la misma red e IP, aislando y protegiendo el tráfico mediante TPROXY transparente con protección NEOX_GUARD (DROP-all gap protection).
 *   **Seguro y Ligero:** Al usar Rust y Podman rootless, el consumo de memoria en reposo es mínimo (~3-5MB RAM), proporcionando alta seguridad perimetral para los contenedores.
 *   **Soporte Kubernetes YAML:** Utiliza la compatibilidad nativa de Podman con `play kube` para levantar arquitecturas multicontenedor con archivos YAML, en lugar de depender de Docker Compose.
 
@@ -29,7 +29,7 @@ El proyecto ha completado formalmente la **Fase 1** y tiene un Roadmap definido 
 
 *   **Roadmap Futuro (Fases 2 a 7):**
     *   *Fase 2:* Consola interactiva, visualización de logs y métricas (CPU/RAM) en tiempo real mediante WebSockets.
-    *   *Fase 3:* Soporte para creación y gestión de Pods completos junto con proxy *tun2socks*.
+    *   *Fase 3:* Soporte para creación y gestión de Pods completos junto con proxy transparente *hev-socks5-tproxy*.
     *   *Fase 4:* Despliegue de stacks complejos desde archivos Kubernetes YAML.
     *   *Fase 5:* File Manager completo (listar, leer, descargar, subir, permisos).
     *   *Fase 6:* Sistema de Backups (compresión, guardado, checksum, restauración).
