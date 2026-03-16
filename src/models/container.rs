@@ -37,6 +37,14 @@ pub struct CreateContainerRequest {
     pub entrypoint: Option<Vec<String>>,
 }
 
+/// Request body for renaming a container.
+/// Maps to POST /api/containers/:id/rename
+#[derive(Debug, Deserialize)]
+pub struct RenameContainerRequest {
+    /// New container name
+    pub name: String,
+}
+
 /// Port mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PortMapping {

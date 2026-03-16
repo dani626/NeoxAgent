@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::models::container::{
-    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery, LogsQuery,
+    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery, LogsQuery, RenameContainerRequest,
 };
 use crate::services::podman;
 use crate::AppState;
@@ -142,6 +142,29 @@ pub async fn kill_container(
         "success": true,
         "message": format!("Container '{}' killed", id),
         "container_id": id,
+    })))
+}
+
+/// POST /api/containers/:id/rename
+/// Renames a container.
+pub async fn rename_container(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RenameContainerRequest>,
+) -> Result<Json<Value>, AppError> {
+    if req.name.is_empty() {
+        return Err(AppError::BadRequest("New container name is required".into()));
+    }
+
+    tracing::info!("🏷️ Renaming container '{}' to '{}'", id, req.name);
+    state.podman.containers().get(&id).rename(&req.name).await
+        .map_err(|e| AppError::Podman(format!("Failed to rename container: {}", e)))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": format!("Container '{}' renamed to '{}'", id, req.name),
+        "container_id": id,
+        "new_name": req.name,
     })))
 }
 

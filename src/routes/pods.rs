@@ -10,13 +10,13 @@ use podman_api::models::{
     PortMapping as PodmanPortMapping,
 };
 use podman_api::opts::{
-    ContainerCreateOpts, PodCreateOpts, PodListOpts,
+    ContainerCreateOpts, ContainerDeleteOpts, PodCreateOpts, PodListOpts,
 };
 
 use crate::error::AppError;
 use crate::models::pod::{
     AddContainerToPodRequest, CreatePodRequest, DeletePodQuery, GenerateKubeQuery,
-    PodContainerInfo, PodResponse, PodSummary,
+    PodContainerInfo, PodResponse, PodSummary, RenamePodRequest, UpdateProxyRequest,
 };
 use crate::models::container::LogsQuery;
 use crate::AppState;
@@ -720,6 +720,223 @@ pub async fn get_pod_logs(
 ) -> Result<String, AppError> {
     crate::services::podman::get_pod_logs(&state, &id, query.tail).await
 }
+
+// ─── Rename Pod ─────────────────────────────────────────────────────────────
+
+/// POST /api/pods/:id/rename
+/// Renames a pod by calling `podman pod rename` directly via std::process::Command.
+pub async fn rename_pod(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RenamePodRequest>,
+) -> Result<Json<Value>, AppError> {
+    if req.name.is_empty() {
+        return Err(AppError::BadRequest("New pod name is required".into()));
+    }
+
+    tracing::info!("🏷️ Renaming pod '{}' to '{}'", id, req.name);
+
+    let output = std::process::Command::new("podman")
+        .args(["pod", "rename", &id, &req.name])
+        .output()
+        .map_err(|e| AppError::Internal(format!("Failed to execute podman pod rename: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Podman(format!("podman pod rename failed: {}", stderr)));
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "message": format!("Pod '{}' renamed to '{}'", id, req.name),
+        "pod_id": id,
+        "new_name": req.name,
+    })))
+}
+
+// ─── Update Proxy ───────────────────────────────────────────────────────────
+
+/// POST /api/pods/:id/proxy
+pub async fn update_proxy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateProxyRequest>,
+) -> Result<Json<Value>, AppError> {
+    tracing::info!("🔌 Updating proxy for pod '{}'. proxy enabled: {}", id, req.proxy.enabled);
+    
+    let pod = state.podman.pods().get(&id);
+    let inspect = pod.inspect().await
+        .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
+        
+    let pod_name = inspect.name.clone().unwrap_or_else(|| id.clone());
+
+    // 1. Find and delete existing sidecar if any
+    if let Some(ctrs) = &inspect.containers {
+        for c in ctrs {
+            let name = c.name.as_deref().unwrap_or("");
+            if name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks") {
+                tracing::info!("🗑️ Deleting existing proxy sidecar: {}", name);
+                let _ = state.podman.containers().get(&c.id.clone().unwrap()).delete(
+                    &ContainerDeleteOpts::builder().force(true).build()
+                ).await;
+            }
+        }
+    }
+
+    // 2. If proxy is disabled now, we are done
+    if !req.proxy.enabled {
+        return Ok(Json(json!({
+            "success": true,
+            "message": format!("Proxy removed for pod '{}'", id),
+        })));
+    }
+
+    // 3. Create new sidecar
+    let socks5_url = req.proxy.socks5_url.as_deref()
+        .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
+
+    // Parse socks5://[user:pass@]host:port
+    let url_str = socks5_url.trim_start_matches("socks5://");
+    let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
+        (Some(auth), rest)
+    } else {
+        (None, url_str)
+    };
+
+    let (proxy_host, proxy_port) = match host_part.split_once(':') {
+        Some((h, p)) => (h, p),
+        None => (host_part, "1080")
+    };
+
+    let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
+        match auth.split_once(':') {
+            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
+            None => (Some(auth.to_string()), None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let proxy_image = req.proxy.image.as_deref()
+        .unwrap_or("localhost/neox-tproxy-sidecar:latest");
+
+    let log_level = req.proxy.loglevel.as_deref().unwrap_or("warn");
+
+    // We can't reuse the exact old name if it's recently deleted in Podman sometimes so we append a random string
+    let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
+    let sidecar_name = format!("{}-hev-tproxy-{}", pod_name, short_uuid);
+
+    let auth_yaml = match (&proxy_user, &proxy_pass) {
+        (Some(user), Some(pass)) => format!("  username: '{}'\n  password: '{}'", user, pass),
+        _ => String::new(),
+    };
+
+    let script = format!(r#"
+set -e
+if ! command -v iptables >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
+fi
+mkdir -p /etc/hev
+cat > /etc/hev/tproxy.yml << 'HEVEOF'
+main:
+  workers: 1
+socks5:
+  port: {proxy_port}
+  address: '{proxy_host}'
+  udp: 'udp'
+  mark: 438
+{auth_yaml}
+tcp:
+  port: 1088
+  address: '0.0.0.0'
+udp:
+  port: 1088
+  address: '0.0.0.0'
+misc:
+  task-stack-size: 131072
+  connect-timeout: 5000
+  tcp-read-write-timeout: 300000
+  udp-read-write-timeout: 60000
+  log-file: stderr
+  log-level: {log_level}
+HEVEOF
+iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
+iptables -t mangle -F HEV_TPROXY
+iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
+iptables -t mangle -A HEV_TPROXY -p udp --dport 53 -j RETURN
+iptables -t mangle -A HEV_TPROXY -p tcp --dport 53 -j RETURN
+iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -A PREROUTING -j HEV_TPROXY
+iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
+iptables -t mangle -F HEV_OUTPUT
+iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p udp --dport 53 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p tcp --dport 53 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
+iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
+iptables -t mangle -A OUTPUT -j HEV_OUTPUT
+ip rule add fwmark 0x440 table 100 2>/dev/null || true
+ip route add local default dev lo table 100 2>/dev/null || true
+echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
+exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
+"#);
+
+    let sidecar_opts = ContainerCreateOpts::builder()
+        .name(&sidecar_name)
+        .image(proxy_image)
+        .pod(pod_name.as_str())
+        .privileged(true)
+        .mounts(vec![
+            podman_api::models::ContainerMount {
+                destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+                source: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
+                _type: Some("bind".to_string()),
+                options: Some(vec!["ro".to_string()]),
+                uid_mappings: None,
+                gid_mappings: None,
+            }
+        ])
+        .command(["sh", "-c", &script])
+        .labels([
+            ("neox.role", "proxy-sidecar"),
+            ("neox.proxy.type", "hev-socks5-tproxy"),
+            ("neox.pod", pod_name.as_str()),
+        ])
+        .build();
+
+    let created = state.podman.containers()
+        .create(&sidecar_opts)
+        .await
+        .map_err(|e| AppError::Podman(format!("Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e)))?;
+
+    state.podman.containers().get(&created.id).start(None).await
+        .map_err(|e| AppError::Podman(format!("Failed to start sidecar container: {}", e)))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": format!("Proxy updated for pod '{}'", id),
+    })))
+}
+
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

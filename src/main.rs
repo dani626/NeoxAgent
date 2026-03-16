@@ -141,6 +141,10 @@ async fn main() {
         )
         // ─── Container lifecycle routes ─────────────────────────────
         .route(
+            "/api/containers/{id}/rename",
+            post(routes::containers::rename_container),
+        )
+        .route(
             "/api/containers/{id}/start",
             post(routes::containers::start_container),
         )
@@ -192,6 +196,14 @@ async fn main() {
         // ─── Volumes ────────────────────────────────────────────────
         .nest("/api/volumes", routes::volumes::router())
         // ─── Phase 3: Pod lifecycle routes ──────────────────────────
+        .route(
+            "/api/pods/{id}/rename",
+            post(routes::pods::rename_pod),
+        )
+        .route(
+            "/api/pods/{id}/proxy",
+            post(routes::pods::update_proxy),
+        )
         .route(
             "/api/pods/{id}/start",
             post(routes::pods::start_pod),

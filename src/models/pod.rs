@@ -91,6 +91,21 @@ pub struct AddContainerToPodRequest {
     pub container: PodContainerSpec,
 }
 
+/// Request body for renaming a pod.
+/// Maps to POST /api/pods/:id/rename
+#[derive(Debug, Deserialize)]
+pub struct RenamePodRequest {
+    /// New pod name
+    pub name: String,
+}
+
+/// Request body for updating a pod's proxy config.
+/// Maps to POST /api/pods/:id/proxy
+#[derive(Debug, Deserialize)]
+pub struct UpdateProxyRequest {
+    pub proxy: ProxyConfig,
+}
+
 // ─── Response Types ──────────────────────────────────────────────────────────
 
 /// Standard pod response returned by the API
