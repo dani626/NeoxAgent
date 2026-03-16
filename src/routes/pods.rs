@@ -10,7 +10,8 @@ use podman_api::models::{
     PortMapping as PodmanPortMapping,
 };
 use podman_api::opts::{
-    ContainerCreateOpts, ContainerDeleteOpts, PodCreateOpts, PodListOpts,
+    ContainerCreateOpts, ContainerDeleteOpts, ContainerRestartPolicy,
+    PodCreateOpts, PodListOpts,
 };
 
 use crate::error::AppError;
@@ -270,11 +271,11 @@ exit 1
     )
 }
 
-/// Returns the podman restart policy string for the tproxy sidecar.
-/// on-failure:10 = retry up to 10 times if the container exits non-zero.
+/// Returns the Podman restart policy for the tproxy sidecar.
+/// OnFailure(10) = retry up to 10 times if the container exits non-zero.
 /// Each restart re-executes the full script, reinstalling NEOX_GUARD first.
-fn tproxy_restart_policy() -> &'static str {
-    "on-failure:10"
+fn tproxy_restart_policy() -> ContainerRestartPolicy {
+    ContainerRestartPolicy::OnFailure(10)
 }
 
 /// Writes neox.proxy.url label to the pod via `podman pod label`.
@@ -473,8 +474,8 @@ pub async fn create_pod(
             state.podman.containers().get(&created_sidecar.id).start(None).await
                 .map_err(|e| AppError::Podman(format!(
                     "Failed to start sidecar '{}': {}", sidecar_name, e)))?;
-            tracing::info!("✅ Sidecar '{}' started first — NEOX_GUARD active (restart: {})",
-                sidecar_name, tproxy_restart_policy());
+            tracing::info!("✅ Sidecar '{}' started first — NEOX_GUARD active",
+                sidecar_name);
 
             sidecar_id = Some(created_sidecar.id);
             set_pod_proxy_label(&req.name, socks5_url);
@@ -919,8 +920,8 @@ pub async fn update_proxy(
 
     set_pod_proxy_label(&pod_name, socks5_url);
 
-    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started (restart: {})",
-        id, sidecar_name, tproxy_restart_policy());
+    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started",
+        id, sidecar_name);
     Ok(Json(json!({
         "success": true,
         "message": format!("Proxy updated for pod '{}'", id),
