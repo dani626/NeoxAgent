@@ -24,8 +24,226 @@ use crate::AppState;
 // ─── List Pods ───────────────────────────────────────────────────────────────
 
 /// GET /api/pods
-/// Lists all pods managed by Podman on this node.
 pub async fn list_pods(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let pods = state.podman.pods()
+        .list(&PodListOpts::builder().build())
+        .await
+        .map_err(|e| AppError::Podman(format!("Failed to list pods: {}", e)))?;
+
+    let summaries: Vec<PodSummary> = pods.iter().map(|p| {
+        PodSummary {
+            id: p.id.clone().unwrap_or_default(),
+            name: p.name.clone(),
+            status: p.status.clone(),
+            created: p.created.map(|t| t.to_rfc3339()),
+            num_containers: p.containers.as_ref().map(|c| c.len() as i64),
+            infra_id: p.infra_id.clone(),
+            labels: p.labels.clone(),
+        }
+    }).collect();
+
+    let total = summaries.len();
+
+    Ok(Json(json!({
+        "pods": summaries,
+        "total": total,
+    })))
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Builds the bash startup script for the hev-socks5-tproxy sidecar.
+/// 
+/// Security properties:
+/// - Installs iptables DROP rules on mangle PREROUTING + OUTPUT **before** any
+///   hev configuration, so zero packets can escape during the swap window.
+/// - DROP rules are removed only right before `exec hev-socks5-tproxy`, so
+///   the window with no interception is at most a few milliseconds.
+/// - Skips DROP on loopback (127/8) so the container can still communicate
+///   internally during startup.
+fn build_tproxy_script(
+    proxy_host: &str,
+    proxy_port: &str,
+    auth_yaml: &str,
+    dns_server: &str,
+    log_level: &str,
+) -> String {
+    format!(r#"
+set -e
+
+# ── OPTION C: Drop-all gap protection ────────────────────────────────────────
+# Block ALL non-loopback traffic immediately so no packets escape while we
+# tear down the old sidecar rules and set up the new ones.
+iptables -t mangle -N NEOX_GUARD 2>/dev/null || true
+iptables -t mangle -F NEOX_GUARD
+iptables -t mangle -A NEOX_GUARD -i lo -j RETURN
+iptables -t mangle -A NEOX_GUARD -j DROP
+# Insert at position 1 to take priority over any stale rules
+iptables -t mangle -I PREROUTING 1 -j NEOX_GUARD
+iptables -t mangle -I OUTPUT 1 -j NEOX_GUARD
+
+# ── Pre-requisites ────────────────────────────────────────────────────────────
+if ! command -v iptables >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
+fi
+
+# ── hev-socks5-tproxy config ──────────────────────────────────────────────────
+mkdir -p /etc/hev
+cat > /etc/hev/tproxy.yml << 'HEVEOF'
+main:
+  workers: 1
+
+socks5:
+  port: {proxy_port}
+  address: '{proxy_host}'
+  udp: 'udp'
+  mark: 438
+{auth_yaml}
+
+tcp:
+  port: 1088
+  address: '0.0.0.0'
+
+udp:
+  port: 1088
+  address: '0.0.0.0'
+
+misc:
+  task-stack-size: 131072
+  connect-timeout: 5000
+  tcp-read-write-timeout: 300000
+  udp-read-write-timeout: 60000
+  log-file: stderr
+  log-level: {log_level}
+HEVEOF
+
+# ── DNS redirect ──────────────────────────────────────────────────────────────
+iptables -t nat -N HEV_DNS 2>/dev/null || true
+iptables -t nat -F HEV_DNS
+iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
+iptables -t nat -A PREROUTING -j HEV_DNS
+iptables -t nat -A OUTPUT -j HEV_DNS
+
+# ── TPROXY rules ──────────────────────────────────────────────────────────────
+iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
+iptables -t mangle -F HEV_TPROXY
+iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8    -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8   -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8  -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4  -j RETURN
+iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4  -j RETURN
+iptables -t mangle -A HEV_TPROXY -d {proxy_host}  -j RETURN
+iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
+iptables -t mangle -A PREROUTING -j HEV_TPROXY
+
+iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
+iptables -t mangle -F HEV_OUTPUT
+iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8    -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8   -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -d {proxy_host}  -j RETURN
+iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
+iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
+iptables -t mangle -A OUTPUT -j HEV_OUTPUT
+
+# ── Policy routing ────────────────────────────────────────────────────────────
+ip rule add fwmark 0x440 table 100 2>/dev/null || true
+ip route add local default dev lo table 100 2>/dev/null || true
+
+# ── OPTION C: Lift drop-all guard — hev is about to take over ─────────────────
+# All TPROXY rules are now in place. Remove the guard so hev can intercept.
+iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
+iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
+iptables -t mangle -F NEOX_GUARD 2>/dev/null || true
+iptables -t mangle -X NEOX_GUARD 2>/dev/null || true
+
+echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
+exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
+"#,
+        proxy_port = proxy_port,
+        proxy_host = proxy_host,
+        auth_yaml = auth_yaml,
+        dns_server = dns_server,
+        log_level = log_level,
+    )
+}
+
+/// Parses a socks5://[user:pass@]host:port URL into its components.
+fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String, String) {
+    let url_str = socks5_url.trim_start_matches("socks5://");
+    let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
+        (Some(auth), rest)
+    } else {
+        (None, url_str)
+    };
+    let (proxy_host, proxy_port) = match host_part.split_once(':') {
+        Some((h, p)) => (h.to_string(), p.to_string()),
+        None => (host_part.to_string(), "1080".to_string()),
+    };
+    let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
+        match auth.split_once(':') {
+            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
+            None => (Some(auth.to_string()), None),
+        }
+    } else {
+        (None, None)
+    };
+    (proxy_user, proxy_pass, proxy_host, proxy_port)
+}
+
+/// Writes neox.proxy.url label to the pod via `podman pod label`.
+/// This is the Opción B persistence mechanism.
+fn set_pod_proxy_label(pod_name: &str, socks5_url: &str) {
+    let label = format!("neox.proxy.url={}", socks5_url);
+    let result = std::process::Command::new("podman")
+        .args(["pod", "label", pod_name, &label])
+        .output();
+    match result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("✅ Set neox.proxy.url label on pod '{}'", pod_name);
+        }
+        Ok(o) => {
+            tracing::warn!(
+                "⚠️ podman pod label failed for '{}': {}",
+                pod_name,
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Err(e) => {
+            tracing::warn!("⚠️ Failed to execute podman pod label: {}", e);
+        }
+    }
+}
+
+/// Removes neox.proxy.url label from the pod.
+fn remove_pod_proxy_label(pod_name: &str) {
+    let result = std::process::Command::new("podman")
+        .args(["pod", "label", "--delete", "neox.proxy.url", pod_name])
+        .output();
+    if let Err(e) = result {
+        tracing::warn!("⚠️ Failed to remove neox.proxy.url label from pod '{}': {}", pod_name, e);
+    }
+}
+
+// ─── List Pods ───────────────────────────────────────────────────────────────
+
+/// GET /api/pods
+/// Lists all pods managed by Podman on this node.
+pub async fn list_pods_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
     let pods = state.podman.pods()
@@ -56,19 +274,16 @@ pub async fn list_pods(
 // ─── Create Pod ──────────────────────────────────────────────────────────────
 
 /// POST /api/pods
-/// Creates a new pod, optionally with a tun2socks proxy sidecar and game server containers.
 pub async fn create_pod(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePodRequest>,
 ) -> Result<Json<Value>, AppError> {
-    // Validate
     if req.name.is_empty() {
         return Err(AppError::BadRequest("Pod name is required".into()));
     }
 
     tracing::info!("🏗️ Creating pod '{}'", req.name);
 
-    // Collect all port mappings from all containers for the pod-level config
     let mut all_ports: Vec<PodmanPortMapping> = Vec::new();
     for ctr in &req.containers {
         for p in &ctr.ports {
@@ -82,7 +297,6 @@ pub async fn create_pod(
         }
     }
 
-    // Build PodCreateOpts
     let mut pod_builder = PodCreateOpts::builder()
         .name(&req.name)
         .labels(req.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -90,17 +304,14 @@ pub async fn create_pod(
     if !all_ports.is_empty() {
         pod_builder = pod_builder.portmappings(all_ports);
     }
-
     if let Some(hostname) = &req.hostname {
         pod_builder = pod_builder.hostname(hostname.as_str());
     }
-
     if !req.dns_servers.is_empty() {
         pod_builder = pod_builder.dns_server(req.dns_servers.iter().map(|s| s.as_str()));
     }
 
     let pod_opts = pod_builder.build();
-
     let pod = state.podman.pods()
         .create(&pod_opts)
         .await
@@ -109,7 +320,6 @@ pub async fn create_pod(
     let pod_id = pod.id().to_string();
     tracing::info!("✅ Pod '{}' created: {}", req.name, pod_id);
 
-    // Step 2: If proxy is enabled, create hev-socks5-tproxy sidecar container
     let proxy_enabled = req.proxy.as_ref().map_or(false, |p| p.enabled);
 
     if proxy_enabled {
@@ -117,33 +327,10 @@ pub async fn create_pod(
             let socks5_url = proxy.socks5_url.as_deref()
                 .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
 
-            // Parse socks5://[user:pass@]host:port
-            let url_str = socks5_url.trim_start_matches("socks5://");
-
-            let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
-                (Some(auth), rest)
-            } else {
-                (None, url_str)
-            };
-
-            let (proxy_host, proxy_port) = match host_part.split_once(':') {
-                Some((h, p)) => (h, p),
-                None => (host_part, "1080")
-            };
-
-            // Parse username:password if present
-            let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
-                match auth.split_once(':') {
-                    Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
-                    None => (Some(auth.to_string()), None),
-                }
-            } else {
-                (None, None)
-            };
+            let (proxy_user, proxy_pass, proxy_host, proxy_port) = parse_socks5_url(socks5_url);
 
             let proxy_image = proxy.image.as_deref()
                 .unwrap_or("localhost/neox-tproxy-sidecar:latest");
-
             let log_level = proxy.loglevel.as_deref().unwrap_or("warn");
             let dns_server = proxy.dns.as_deref().unwrap_or("8.8.8.8");
 
@@ -155,126 +342,18 @@ pub async fn create_pod(
                 if proxy_user.is_some() { "yes" } else { "no" }
             );
 
-            // Build auth YAML lines if credentials are provided
             let auth_yaml = match (&proxy_user, &proxy_pass) {
-                (Some(user), Some(pass)) => format!(
-                    "  username: '{}'\n  password: '{}'",
-                    user, pass
-                ),
+                (Some(user), Some(pass)) => format!("  username: '{}'\n  password: '{}'", user, pass),
                 _ => String::new(),
             };
 
-            // Build the startup script that:
-            // 1. Writes a hev-socks5-tproxy YAML config
-            // 2. Sets up iptables TPROXY rules
-            // 3. Execs hev-socks5-tproxy
-            let script = format!(r#"
-set -e
-
-# Install iptables and iproute2 if not already present (pre-baked image has them)
-if ! command -v iptables >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
-fi
-
-# Write hev-socks5-tproxy config
-mkdir -p /etc/hev
-cat > /etc/hev/tproxy.yml << 'HEVEOF'
-main:
-  workers: 1
-
-socks5:
-  port: {proxy_port}
-  address: '{proxy_host}'
-  udp: 'udp'
-  mark: 438
-{auth_yaml}
-
-tcp:
-  port: 1088
-  address: '0.0.0.0'
-
-udp:
-  port: 1088
-  address: '0.0.0.0'
-
-misc:
-  task-stack-size: 131072
-  connect-timeout: 5000
-  tcp-read-write-timeout: 300000
-  udp-read-write-timeout: 60000
-  log-file: stderr
-  log-level: {log_level}
-HEVEOF
-
-# Force all DNS traffic (port 53) to the configured DNS server
-# This ensures it isn't routed to local/skipped IPs which would leak DNS
-iptables -t nat -N HEV_DNS 2>/dev/null || true
-iptables -t nat -F HEV_DNS
-iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
-iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
-iptables -t nat -A PREROUTING -j HEV_DNS
-iptables -t nat -A OUTPUT -j HEV_DNS
-
-# Setup TPROXY iptables rules (mangle table, not NAT)
-# Mark 0x438 = 1080 (used by hev to skip its own traffic)
-# Mark 0x440 = 1088 (tproxy mark for routing)
-
-iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
-iptables -t mangle -F HEV_TPROXY
-
-# Skip hev-socks5-tproxy's own outgoing traffic (marked 0x438)
-iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
-
-# Skip private/reserved networks
-iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
-
-# Skip traffic to the SOCKS5 server itself
-iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
-
-# TPROXY: redirect TCP+UDP to hev-socks5-tproxy on port 1088
-iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
-iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
-
-# Apply to PREROUTING (for other containers in this pod)
-iptables -t mangle -A PREROUTING -j HEV_TPROXY
-
-# Apply to OUTPUT (for local traffic in this container)
-iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
-iptables -t mangle -F HEV_OUTPUT
-iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
-iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
-iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
-iptables -t mangle -A OUTPUT -j HEV_OUTPUT
-
-# Setup policy routing for TPROXY
-ip rule add fwmark 0x440 table 100 2>/dev/null || true
-ip route add local default dev lo table 100 2>/dev/null || true
-
-echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
-exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
-"#);
+            let script = build_tproxy_script(&proxy_host, &proxy_port, &auth_yaml, dns_server, log_level);
 
             let sidecar_opts = ContainerCreateOpts::builder()
                 .name(&sidecar_name)
                 .image(proxy_image)
                 .pod(req.name.as_str())
-                .privileged(true) // Required for iptables + TPROXY (NET_ADMIN)
+                .privileged(true)
                 .mounts(vec![
                     ContainerMount {
                         destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
@@ -301,10 +380,12 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
                 )))?;
 
             tracing::info!("✅ hev-socks5-tproxy sidecar '{}' created", sidecar_name);
+
+            // Opción B: persist proxy URL as pod label
+            set_pod_proxy_label(&req.name, socks5_url);
         }
     }
 
-    // Step 3: Create user-specified containers inside the pod
     for ctr_spec in &req.containers {
         if ctr_spec.name.is_empty() {
             return Err(AppError::BadRequest("Container name is required".into()));
@@ -335,7 +416,6 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             .pod(req.name.as_str())
             .labels(label_map);
 
-        // Apply resource limits (memory)
         if let Some(limits) = &ctr_spec.limits {
             if let Some(mem) = limits.memory_mb {
                 let mem_bytes = (mem * 1024 * 1024) as i64;
@@ -364,7 +444,6 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             }
         }
 
-        // Apply volume mounts using ContainerMount (the type expected by mounts())
         for vol in &ctr_spec.volumes {
             ctr_builder = ctr_builder.mounts([
                 ContainerMount {
@@ -378,21 +457,16 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
             ]);
         }
 
-        // Apply entrypoint override
         if let Some(ref entrypoint) = ctr_spec.entrypoint {
             if !entrypoint.is_empty() {
-                tracing::info!("🛠️ [POD] Overriding entrypoint for '{}' to: {:?}", ctr_name, entrypoint);
                 ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
             }
         }
 
-        // Apply command override
         if !ctr_spec.command.is_empty() {
-            tracing::info!("🛠️ [POD] Overriding command for '{}' to: {:?}", ctr_name, ctr_spec.command);
             ctr_builder = ctr_builder.command(ctr_spec.command.iter().map(|s| s.as_str()));
         }
 
-        // Create with temporary name
         let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
         let ctr_opts = ctr_builder.name(&temp_name).build();
 
@@ -403,7 +477,6 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
                 "Failed to create container '{}' in pod '{}': {}", ctr_name, req.name, e
             )))?;
 
-        // Rename to final name-shortid
         let short_id = &created.id[..12];
         let final_name = format!("{}-{}", ctr_name, short_id);
         state.podman.containers().get(&created.id).rename(&final_name).await
@@ -412,27 +485,30 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
         tracing::info!("✅ Container '{}' created in pod '{}'", ctr_name, req.name);
     }
 
-    // Step 4: Start the pod (all containers start together)
     tracing::info!("🚀 Starting pod '{}'", req.name);
     pod.start()
         .await
         .map_err(|e| AppError::Podman(format!("Failed to start pod '{}': {}", req.name, e)))?;
     tracing::info!("✅ Pod '{}' started successfully", req.name);
 
-    // Return pod info
     let inspect = pod.inspect()
         .await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod: {}", e)))?;
 
-    let response = build_pod_response(&inspect, proxy_enabled);
+    // Read back the label we just set so the response is accurate
+    let proxy_url = if proxy_enabled {
+        req.proxy.as_ref().and_then(|p| p.socks5_url.clone())
+    } else {
+        None
+    };
 
+    let response = build_pod_response(&inspect, proxy_enabled, proxy_url);
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
 
 // ─── Inspect Pod ─────────────────────────────────────────────────────────────
 
 /// GET /api/pods/:id
-/// Gets detailed information about a pod.
 pub async fn get_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -443,7 +519,6 @@ pub async fn get_pod(
         .await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
 
-    // Detect if proxy is enabled by checking container names for proxy sidecar pattern
     let proxy_enabled = inspect.containers.as_ref()
         .map(|ctrs| {
             ctrs.iter().any(|c| {
@@ -453,36 +528,34 @@ pub async fn get_pod(
         })
         .unwrap_or(false);
 
-    let response = build_pod_response(&inspect, proxy_enabled);
+    // Opción B: read proxy URL from pod label
+    let proxy_url = inspect.labels
+        .as_ref()
+        .and_then(|l| l.get("neox.proxy.url"))
+        .cloned();
 
+    let response = build_pod_response(&inspect, proxy_enabled, proxy_url);
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
 
 // ─── Delete Pod ──────────────────────────────────────────────────────────────
 
 /// DELETE /api/pods/:id
-/// Deletes a pod and all its containers.
 pub async fn delete_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<DeletePodQuery>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("🗑️ Deleting pod '{}' (force: {})", id, query.force);
-
     let pod = state.podman.pods().get(&id);
-
     if query.force {
-        pod.remove()
-            .await
+        pod.remove().await
             .map_err(|e| AppError::Podman(format!("Failed to force-remove pod '{}': {}", id, e)))?;
     } else {
-        pod.delete()
-            .await
+        pod.delete().await
             .map_err(|e| AppError::Podman(format!("Failed to delete pod '{}': {}", id, e)))?;
     }
-
     tracing::info!("✅ Pod '{}' deleted", id);
-
     Ok(Json(json!({
         "success": true,
         "message": format!("Pod '{}' deleted successfully", id),
@@ -493,20 +566,14 @@ pub async fn delete_pod(
 // ─── Start Pod ───────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/start
-/// Starts a pod and all its containers.
 pub async fn start_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("▶️ Starting pod '{}'", id);
-
-    state.podman.pods().get(&id)
-        .start()
-        .await
+    state.podman.pods().get(&id).start().await
         .map_err(|e| AppError::Podman(format!("Failed to start pod '{}': {}", id, e)))?;
-
     tracing::info!("✅ Pod '{}' started", id);
-
     Ok(Json(json!({
         "success": true,
         "message": format!("Pod '{}' started successfully", id),
@@ -517,20 +584,14 @@ pub async fn start_pod(
 // ─── Stop Pod ────────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/stop
-/// Stops a pod and all its containers.
 pub async fn stop_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("⏹️ Stopping pod '{}'", id);
-
-    state.podman.pods().get(&id)
-        .stop()
-        .await
+    state.podman.pods().get(&id).stop().await
         .map_err(|e| AppError::Podman(format!("Failed to stop pod '{}': {}", id, e)))?;
-
     tracing::info!("✅ Pod '{}' stopped", id);
-
     Ok(Json(json!({
         "success": true,
         "message": format!("Pod '{}' stopped successfully", id),
@@ -541,20 +602,14 @@ pub async fn stop_pod(
 // ─── Restart Pod ─────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/restart
-/// Restarts a pod and all its containers.
 pub async fn restart_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("🔄 Restarting pod '{}'", id);
-
-    state.podman.pods().get(&id)
-        .restart()
-        .await
+    state.podman.pods().get(&id).restart().await
         .map_err(|e| AppError::Podman(format!("Failed to restart pod '{}': {}", id, e)))?;
-
     tracing::info!("✅ Pod '{}' restarted", id);
-
     Ok(Json(json!({
         "success": true,
         "message": format!("Pod '{}' restarted successfully", id),
@@ -565,20 +620,15 @@ pub async fn restart_pod(
 // ─── List Pod Containers ─────────────────────────────────────────────────────
 
 /// GET /api/pods/:id/containers
-/// Lists all containers inside a pod.
 pub async fn list_pod_containers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let pod = state.podman.pods().get(&id);
-
-    let inspect = pod.inspect()
-        .await
+    let inspect = pod.inspect().await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
-
     let containers = extract_containers(&inspect.containers);
     let total = containers.len();
-
     Ok(Json(json!({
         "pod_id": id,
         "containers": containers,
@@ -589,14 +639,12 @@ pub async fn list_pod_containers(
 // ─── Add Container to Pod ────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/containers
-/// Adds a new container to an existing pod.
 pub async fn add_container_to_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<AddContainerToPodRequest>,
 ) -> Result<Json<Value>, AppError> {
     let ctr = &req.container;
-
     if ctr.name.is_empty() {
         return Err(AppError::BadRequest("Container name is required".into()));
     }
@@ -624,7 +672,6 @@ pub async fn add_container_to_pod(
         .pod(id.as_str())
         .labels(label_map);
 
-    // Volume mounts
     for vol in &ctr.volumes {
         ctr_builder = ctr_builder.mounts([
             ContainerMount {
@@ -638,21 +685,15 @@ pub async fn add_container_to_pod(
         ]);
     }
 
-    // Entrypoint override
     if let Some(ref entrypoint) = ctr.entrypoint {
         if !entrypoint.is_empty() {
-            tracing::info!("🛠️ [POD ADD] Overriding entrypoint for '{}' to: {:?}", ctr_name, entrypoint);
             ctr_builder = ctr_builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
         }
     }
-
-    // Command override
     if !ctr.command.is_empty() {
-        tracing::info!("🛠️ [POD ADD] Overriding command for '{}' to: {:?}", ctr_name, ctr.command);
         ctr_builder = ctr_builder.command(ctr.command.iter().map(|s| s.as_str()));
     }
 
-    // Create with temporary name
     let temp_name = format!("{}-tmp-{}", ctr_name, uuid::Uuid::new_v4().to_string()[..8].to_string());
     let ctr_opts = ctr_builder.name(&temp_name).build();
 
@@ -663,7 +704,6 @@ pub async fn add_container_to_pod(
             "Failed to create container '{}' in pod '{}': {}", ctr_name, id, e
         )))?;
 
-    // Rename to final name-shortid
     let short_id = &created.id[..12];
     let final_name = format!("{}-{}", ctr_name, short_id);
     state.podman.containers().get(&created.id).rename(&final_name).await
@@ -672,13 +712,10 @@ pub async fn add_container_to_pod(
     let container_id = created.id.clone();
     tracing::info!("✅ Container '{}' added to pod '{}' (id: {})", ctr_name, id, container_id);
 
-    // Start the newly added container via the Podman container handle
     state.podman.containers().get(&container_id)
         .start(None)
         .await
-        .map_err(|e| AppError::Podman(format!(
-            "Failed to start container '{}': {}", ctr_name, e
-        )))?;
+        .map_err(|e| AppError::Podman(format!("Failed to start container '{}': {}", ctr_name, e)))?;
 
     Ok(Json(json!({
         "success": true,
@@ -692,22 +729,17 @@ pub async fn add_container_to_pod(
 // ─── Generate Kube YAML ──────────────────────────────────────────────────────
 
 /// GET /api/pods/:id/kube
-/// Generates Kubernetes YAML for an existing pod.
 pub async fn generate_kube_yaml(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<GenerateKubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!("📄 Generating Kube YAML for pod '{}'", id);
-
     let pod = state.podman.pods().get(&id);
-
-    let yaml = pod.generate_kube_yaml(query.service)
-        .await
+    let yaml = pod.generate_kube_yaml(query.service).await
         .map_err(|e| AppError::Podman(format!(
             "Failed to generate Kube YAML for pod '{}': {}", id, e
         )))?;
-
     Ok(Json(json!({
         "pod_id": id,
         "yaml": yaml,
@@ -727,7 +759,6 @@ pub async fn get_pod_logs(
 // ─── Rename Pod ─────────────────────────────────────────────────────────────
 
 /// POST /api/pods/:id/rename
-/// Renames a pod by calling `podman pod rename` directly via std::process::Command.
 pub async fn rename_pod(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -736,19 +767,15 @@ pub async fn rename_pod(
     if req.name.is_empty() {
         return Err(AppError::BadRequest("New pod name is required".into()));
     }
-
     tracing::info!("🏷️ Renaming pod '{}' to '{}'", id, req.name);
-
     let output = std::process::Command::new("podman")
         .args(["pod", "rename", &id, &req.name])
         .output()
         .map_err(|e| AppError::Internal(format!("Failed to execute podman pod rename: {}", e)))?;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::Podman(format!("podman pod rename failed: {}", stderr)));
     }
-
     Ok(Json(json!({
         "success": true,
         "message": format!("Pod '{}' renamed to '{}'", id, req.name),
@@ -765,68 +792,48 @@ pub async fn update_proxy(
     Path(id): Path<String>,
     Json(req): Json<UpdateProxyRequest>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("🔌 Updating proxy for pod '{}'. proxy enabled: {}", id, req.proxy.enabled);
-    
+    tracing::info!("🔌 Updating proxy for pod '{}'. enabled: {}", id, req.proxy.enabled);
+
     let pod = state.podman.pods().get(&id);
     let inspect = pod.inspect().await
         .map_err(|e| AppError::Podman(format!("Failed to inspect pod '{}': {}", id, e)))?;
-        
+
     let pod_name = inspect.name.clone().unwrap_or_else(|| id.clone());
 
-    // 1. Find and delete existing sidecar if any
+    // 1. Find and force-delete existing proxy sidecar(s)
     if let Some(ctrs) = &inspect.containers {
         for c in ctrs {
             let name = c.name.as_deref().unwrap_or("");
             if name.contains("hev-tproxy") || name.contains("ipt2socks") || name.contains("tun2socks") {
-                tracing::info!("🗑️ Deleting existing proxy sidecar: {}", name);
-                let _ = state.podman.containers().get(&c.id.clone().unwrap()).delete(
-                    &ContainerDeleteOpts::builder().force(true).build()
-                ).await;
+                tracing::info!("🗑️ Removing existing proxy sidecar: {}", name);
+                let ctr_id = c.id.clone().unwrap_or_default();
+                let _ = state.podman.containers().get(&ctr_id)
+                    .delete(&ContainerDeleteOpts::builder().force(true).build())
+                    .await;
             }
         }
     }
 
-    // 2. If proxy is disabled now, we are done
+    // 2. If proxy disabled → remove label and return
     if !req.proxy.enabled {
+        remove_pod_proxy_label(&pod_name);
         return Ok(Json(json!({
             "success": true,
             "message": format!("Proxy removed for pod '{}'", id),
         })));
     }
 
-    // 3. Create new sidecar
+    // 3. Create new sidecar with Opción C drop-all guard in script
     let socks5_url = req.proxy.socks5_url.as_deref()
         .ok_or_else(|| AppError::BadRequest("socks5_url is required when proxy is enabled".into()))?;
 
-    // Parse socks5://[user:pass@]host:port
-    let url_str = socks5_url.trim_start_matches("socks5://");
-    let (auth_part, host_part) = if let Some((auth, rest)) = url_str.split_once('@') {
-        (Some(auth), rest)
-    } else {
-        (None, url_str)
-    };
-
-    let (proxy_host, proxy_port) = match host_part.split_once(':') {
-        Some((h, p)) => (h, p),
-        None => (host_part, "1080")
-    };
-
-    let (proxy_user, proxy_pass) = if let Some(auth) = auth_part {
-        match auth.split_once(':') {
-            Some((u, p)) => (Some(u.to_string()), Some(p.to_string())),
-            None => (Some(auth.to_string()), None),
-        }
-    } else {
-        (None, None)
-    };
+    let (proxy_user, proxy_pass, proxy_host, proxy_port) = parse_socks5_url(socks5_url);
 
     let proxy_image = req.proxy.image.as_deref()
         .unwrap_or("localhost/neox-tproxy-sidecar:latest");
-
     let log_level = req.proxy.loglevel.as_deref().unwrap_or("warn");
     let dns_server = req.proxy.dns.as_deref().unwrap_or("8.8.8.8");
 
-    // We can't reuse the exact old name if it's recently deleted in Podman sometimes so we append a random string
     let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
     let sidecar_name = format!("{}-hev-tproxy-{}", pod_name, short_uuid);
 
@@ -835,78 +842,7 @@ pub async fn update_proxy(
         _ => String::new(),
     };
 
-    let script = format!(r#"
-set -e
-if ! command -v iptables >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -yq iptables iproute2 ca-certificates >/dev/null 2>&1
-fi
-mkdir -p /etc/hev
-cat > /etc/hev/tproxy.yml << 'HEVEOF'
-main:
-  workers: 1
-socks5:
-  port: {proxy_port}
-  address: '{proxy_host}'
-  udp: 'udp'
-  mark: 438
-{auth_yaml}
-tcp:
-  port: 1088
-  address: '0.0.0.0'
-udp:
-  port: 1088
-  address: '0.0.0.0'
-misc:
-  task-stack-size: 131072
-  connect-timeout: 5000
-  tcp-read-write-timeout: 300000
-  udp-read-write-timeout: 60000
-  log-file: stderr
-  log-level: {log_level}
-HEVEOF
-
-iptables -t nat -N HEV_DNS 2>/dev/null || true
-iptables -t nat -F HEV_DNS
-iptables -t nat -A HEV_DNS -p udp --dport 53 -j DNAT --to-destination {dns_server}:53
-iptables -t nat -A HEV_DNS -p tcp --dport 53 -j DNAT --to-destination {dns_server}:53
-iptables -t nat -A PREROUTING -j HEV_DNS
-iptables -t nat -A OUTPUT -j HEV_DNS
-
-iptables -t mangle -N HEV_TPROXY 2>/dev/null || true
-iptables -t mangle -F HEV_TPROXY
-iptables -t mangle -A HEV_TPROXY -m mark --mark 0x438 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 0.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 224.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d 240.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_TPROXY -d {proxy_host} -j RETURN
-iptables -t mangle -A HEV_TPROXY -p tcp -j TPROXY --on-port 1088 --tproxy-mark 0x440
-iptables -t mangle -A HEV_TPROXY -p udp -j TPROXY --on-port 1088 --tproxy-mark 0x440
-iptables -t mangle -A PREROUTING -j HEV_TPROXY
-iptables -t mangle -N HEV_OUTPUT 2>/dev/null || true
-iptables -t mangle -F HEV_OUTPUT
-iptables -t mangle -A HEV_OUTPUT -m mark --mark 0x438 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 0.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 169.254.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 224.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d 240.0.0.0/4 -j RETURN
-iptables -t mangle -A HEV_OUTPUT -d {proxy_host} -j RETURN
-iptables -t mangle -A HEV_OUTPUT -p tcp -j MARK --set-mark 0x440
-iptables -t mangle -A HEV_OUTPUT -p udp -j MARK --set-mark 0x440
-iptables -t mangle -A OUTPUT -j HEV_OUTPUT
-ip rule add fwmark 0x440 table 100 2>/dev/null || true
-ip route add local default dev lo table 100 2>/dev/null || true
-echo "Starting hev-socks5-tproxy -> {proxy_host}:{proxy_port}"
-exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
-"#);
+    let script = build_tproxy_script(&proxy_host, &proxy_port, &auth_yaml, dns_server, log_level);
 
     let sidecar_opts = ContainerCreateOpts::builder()
         .name(&sidecar_name)
@@ -914,7 +850,7 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
         .pod(pod_name.as_str())
         .privileged(true)
         .mounts(vec![
-            podman_api::models::ContainerMount {
+            ContainerMount {
                 destination: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
                 source: Some("/usr/local/bin/hev-socks5-tproxy".to_string()),
                 _type: Some("bind".to_string()),
@@ -934,21 +870,29 @@ exec /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
     let created = state.podman.containers()
         .create(&sidecar_opts)
         .await
-        .map_err(|e| AppError::Podman(format!("Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e)))?;
+        .map_err(|e| AppError::Podman(format!(
+            "Failed to create hev-socks5-tproxy sidecar '{}': {}", sidecar_name, e
+        )))?;
 
-    state.podman.containers().get(&created.id).start(None).await
-        .map_err(|e| AppError::Podman(format!("Failed to start sidecar container: {}", e)))?;
+    state.podman.containers().get(&created.id)
+        .start(None)
+        .await
+        .map_err(|e| AppError::Podman(format!("Failed to start sidecar '{}': {}", sidecar_name, e)))?;
+
+    // Opción B: update proxy URL label on the pod
+    set_pod_proxy_label(&pod_name, socks5_url);
+
+    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}'", id, sidecar_name);
 
     Ok(Json(json!({
         "success": true,
         "message": format!("Proxy updated for pod '{}'", id),
+        "sidecar": sidecar_name,
     })))
 }
 
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Extract container info from an Option<Vec<InspectPodContainerInfo>>
 fn extract_containers(
     ctrs: &Option<Vec<InspectPodContainerInfo>>,
 ) -> Vec<PodContainerInfo> {
@@ -963,8 +907,7 @@ fn extract_containers(
         .unwrap_or_default()
 }
 
-/// Build a PodResponse from an InspectPodData struct.
-fn build_pod_response(inspect: &InspectPodData, proxy_enabled: bool) -> PodResponse {
+fn build_pod_response(inspect: &InspectPodData, proxy_enabled: bool, proxy_url: Option<String>) -> PodResponse {
     let id = inspect.id.clone().unwrap_or_default();
     let name = inspect.name.clone().unwrap_or_default();
     let status = inspect.state.clone().unwrap_or_else(|| "unknown".to_string());
@@ -983,6 +926,7 @@ fn build_pod_response(inspect: &InspectPodData, proxy_enabled: bool) -> PodRespo
         labels,
         containers,
         proxy_enabled,
+        proxy_url,
         infra_id,
     }
 }

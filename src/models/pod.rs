@@ -119,6 +119,9 @@ pub struct PodResponse {
     pub labels: HashMap<String, String>,
     pub containers: Vec<PodContainerInfo>,
     pub proxy_enabled: bool,
+    /// SOCKS5 proxy URL stored as pod label neox.proxy.url
+    /// Only present when proxy_enabled is true and the label exists.
+    pub proxy_url: Option<String>,
     pub infra_id: Option<String>,
 }
 
