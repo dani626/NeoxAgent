@@ -33,6 +33,7 @@ SERVICE_NAME="neoxagent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 CONFIG_FILE="${INSTALL_DIR}/config.toml"
 MODE="install"
+CORS_ENTRIES=()   # declared globally so the summary block always has it
 
 for arg in "$@"; do
   case "$arg" in
@@ -136,7 +137,6 @@ else
 
   read -rp "  CORS origins      [sin lista blanca]: " INPUT_CORS
 
-  CORS_ENTRIES=()
   if [ -n "$INPUT_CORS" ]; then
     for origin in $INPUT_CORS; do
       if [[ "$origin" =~ ^https?:// || "$origin" =~ ^\*\. ]]; then
@@ -203,7 +203,6 @@ FINAL_PORT=$(grep 'port' "$CONFIG_FILE" | head -1 | sed 's/[^0-9]*//g')
 # ─── Step 5: Build ────────────────────────────────────────────────────────────
 header "Step 5/7 — Compiling neoxagent"
 
-# Stop service before replacing the binary to avoid "Text file busy"
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
   info "Stopping $SERVICE_NAME before binary replacement..."
   systemctl stop "$SERVICE_NAME"
@@ -316,7 +315,7 @@ echo -e "    ✔ neox-guard.service  — host FORWARD DROP (pre-Podman)"
 echo -e "    ✔ NEOX_GUARD          — pod-level DROP-all gap protection"
 echo -e "    ✔ HEV_FAILSAFE        — permanent kill-switch inside pod netns"
 echo -e "    ✔ Watchdog wrapper    — reinstalls NEOX_GUARD on hev crash"
-if [ ${#CORS_ENTRIES[@]:-0} -gt 0 ] 2>/dev/null; then
+if [ ${#CORS_ENTRIES[@]} -gt 0 ]; then
   echo -e "    ✔ CORS               — restricted to ${#CORS_ENTRIES[@]} origin(s)"
 else
   echo -e "    ${YELLOW}⚠ CORS               — ALL origins allowed (set cors_origins in config.toml)${RESET}"
