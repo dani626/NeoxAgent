@@ -130,34 +130,26 @@ else
   # ── CORS origins ────────────────────────────────────────────────────────────
   echo ""
   echo -e "  ${BOLD}CORS allowed origins${RESET}"
-  echo -e "  ${CYAN}Control which domains/subdomains can make requests to this agent.${RESET}"
-  echo -e "  Formats supported:"
-  echo -e "    ${YELLOW}https://panel.neoxhost.com${RESET}   — exact origin"
-  echo -e "    ${YELLOW}*.neoxhost.com${RESET}               — all subdomains of neoxhost.com"
-  echo -e "    ${YELLOW}http://localhost:3000${RESET}        — local development"
-  echo -e "  Leave blank and press Enter when done."
-  echo -e "  ${RED}Warning: entering nothing will allow ALL origins (dev only).${RESET}\n"
+  echo -e "  Dominios que pueden hacer requests a este agente (separados por espacios)."
+  echo -e "  Ej: ${CYAN}panel.neox.com *.neox.com http://localhost:3000${RESET}"
+  echo -e "  ${RED}Si dejas en blanco: no habrá lista blanca (todos los orígenes permitidos).${RESET}\n"
+
+  read -rp "  CORS origins      [sin lista blanca]: " INPUT_CORS
 
   CORS_ENTRIES=()
-  CORS_INDEX=1
-  while true; do
-    read -rp "  Origin #${CORS_INDEX} (leave blank to finish): " CORS_INPUT
-    if [ -z "$CORS_INPUT" ]; then
-      break
-    fi
-    # Basic sanity check: must start with http/https or *.something
-    if [[ "$CORS_INPUT" =~ ^https?:// || "$CORS_INPUT" =~ ^\*\. ]]; then
-      CORS_ENTRIES+=("$CORS_INPUT")
-      ok "  Added: $CORS_INPUT"
-      CORS_INDEX=$((CORS_INDEX + 1))
-    else
-      warn "  Skipped '$CORS_INPUT' — must start with http://, https://, or *.domain.com"
-    fi
-  done
+  if [ -n "$INPUT_CORS" ]; then
+    for origin in $INPUT_CORS; do
+      if [[ "$origin" =~ ^https?:// || "$origin" =~ ^\*\. ]]; then
+        CORS_ENTRIES+=("$origin")
+      else
+        warn "  Ignorado '$origin' — debe iniciar con http://, https:// o *.dominio"
+      fi
+    done
+  fi
 
   # Build TOML array string
   if [ ${#CORS_ENTRIES[@]} -eq 0 ]; then
-    warn "No origins entered — cors_origins will be empty (ALL origins allowed)."
+    warn "Sin orígenes — cors_origins vacío (TODOS los orígenes permitidos)."
     CORS_TOML="cors_origins = []"
   else
     CORS_TOML="cors_origins = ["
@@ -165,7 +157,6 @@ else
       CORS_TOML+=$'\n  '
       CORS_TOML+="\"${origin}\","
     done
-    # Remove trailing comma from last entry
     CORS_TOML="${CORS_TOML%,}"
     CORS_TOML+=$'\n]'
   fi
