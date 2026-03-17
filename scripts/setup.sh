@@ -127,6 +127,50 @@ else
     read -rp "  TLS key path:  " TLS_KEY
   fi
 
+  # ── CORS origins ────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "  ${BOLD}CORS allowed origins${RESET}"
+  echo -e "  ${CYAN}Control which domains/subdomains can make requests to this agent.${RESET}"
+  echo -e "  Formats supported:"
+  echo -e "    ${YELLOW}https://panel.neoxhost.com${RESET}   — exact origin"
+  echo -e "    ${YELLOW}*.neoxhost.com${RESET}               — all subdomains of neoxhost.com"
+  echo -e "    ${YELLOW}http://localhost:3000${RESET}        — local development"
+  echo -e "  Leave blank and press Enter when done."
+  echo -e "  ${RED}Warning: entering nothing will allow ALL origins (dev only).${RESET}\n"
+
+  CORS_ENTRIES=()
+  CORS_INDEX=1
+  while true; do
+    read -rp "  Origin #${CORS_INDEX} (leave blank to finish): " CORS_INPUT
+    if [ -z "$CORS_INPUT" ]; then
+      break
+    fi
+    # Basic sanity check: must start with http/https or *.something
+    if [[ "$CORS_INPUT" =~ ^https?:// || "$CORS_INPUT" =~ ^\*\. ]]; then
+      CORS_ENTRIES+=("$CORS_INPUT")
+      ok "  Added: $CORS_INPUT"
+      CORS_INDEX=$((CORS_INDEX + 1))
+    else
+      warn "  Skipped '$CORS_INPUT' — must start with http://, https://, or *.domain.com"
+    fi
+  done
+
+  # Build TOML array string
+  if [ ${#CORS_ENTRIES[@]} -eq 0 ]; then
+    warn "No origins entered — cors_origins will be empty (ALL origins allowed)."
+    CORS_TOML="cors_origins = []"
+  else
+    CORS_TOML="cors_origins = ["
+    for origin in "${CORS_ENTRIES[@]}"; do
+      CORS_TOML+=$'\n  '
+      CORS_TOML+="\"${origin}\","
+    done
+    # Remove trailing comma from last entry
+    CORS_TOML="${CORS_TOML%,}"
+    CORS_TOML+=$'\n]'
+  fi
+  # ── end CORS ────────────────────────────────────────────────────────────────
+
   mkdir -p "$DATA_DIR_CFG" "$VOLUMES_DIR"
 
   cat > "$CONFIG_FILE" <<EOF
@@ -135,6 +179,9 @@ host = "0.0.0.0"
 port = ${AGENT_PORT}
 api_key = "${API_KEY}"
 data_dir = "${DATA_DIR_CFG}"
+# Allowed CORS origins. Exact (https://domain.com) or wildcard subdomain (*.domain.com).
+# Empty = allow all (not safe for production).
+${CORS_TOML}
 
 [podman]
 socket = "${PODMAN_SOCKET}"
@@ -278,6 +325,11 @@ echo -e "    ✔ neox-guard.service  — host FORWARD DROP (pre-Podman)"
 echo -e "    ✔ NEOX_GUARD          — pod-level DROP-all gap protection"
 echo -e "    ✔ HEV_FAILSAFE        — permanent kill-switch inside pod netns"
 echo -e "    ✔ Watchdog wrapper    — reinstalls NEOX_GUARD on hev crash"
+if [ ${#CORS_ENTRIES[@]:-0} -gt 0 ] 2>/dev/null; then
+  echo -e "    ✔ CORS               — restricted to ${#CORS_ENTRIES[@]} origin(s)"
+else
+  echo -e "    ${YELLOW}⚠ CORS               — ALL origins allowed (set cors_origins in config.toml)${RESET}"
+fi
 echo ""
 echo -e "  ${BOLD}Commands:${RESET}"
 echo -e "    systemctl status neoxagent      # agent status"
