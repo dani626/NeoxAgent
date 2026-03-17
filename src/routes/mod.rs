@@ -1,6 +1,7 @@
 pub mod backups;
 pub mod containers;
 pub mod files;
+pub mod guard;
 pub mod images;
 pub mod kube;
 pub mod networks;
