@@ -24,6 +24,7 @@ use axum::{
     routing::{delete, get, post},
     Extension, Router,
 };
+use tower::ServiceExt;
 use podman_api::Podman;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -96,7 +97,6 @@ async fn main() {
     let api_key = ApiKey(config.agent.api_key.clone());
     let bind_addr = format!("{}:{}", config.agent.host, config.agent.port);
 
-    // ── Build CORS policy from config ─────────────────────────────────────────
     let allow_origin = crate::cors::build_allow_origin(config.agent.cors_origins.clone());
     let cors_layer = CorsLayer::new()
         .allow_origin(allow_origin)
@@ -116,15 +116,15 @@ async fn main() {
     let state = Arc::new(AppState { podman, config });
 
     let app = Router::new()
-        // ─── System ────────────────────────────────────────────────────────
+        // ─── System ───────────────────────────────────────────────────────
         .route("/api/health", get(routes::system::health))
         .route("/api/system/info", get(routes::system::system_info))
         .route("/api/system/resources", get(routes::system::system_resources))
-        // ─── Guard (IP leak protection) ───────────────────────────────
+        // ─── Guard ────────────────────────────────────────────────────────
         .route("/api/guard/install", post(routes::guard::install_guard))
         .route("/api/guard/lift",    post(routes::guard::lift_guard))
         .route("/api/guard/status",  get(routes::guard::guard_status))
-        // ─── Containers ─────────────────────────────────────────────
+        // ─── Containers ──────────────────────────────────────────────
         .route(
             "/api/containers",
             get(routes::containers::list_containers)
@@ -141,11 +141,11 @@ async fn main() {
         .route("/api/containers/{id}/stop",    post(routes::containers::stop_container))
         .route("/api/containers/{id}/restart", post(routes::containers::restart_container))
         .route("/api/containers/{id}/kill",    post(routes::containers::kill_container))
-        // ─── WebSocket ────────────────────────────────────────────────
+        // ─── WebSocket ─────────────────────────────────────────────────
         .route("/api/containers/{id}/logs/stream", get(routes::ws::ws_logs_stream))
         .route("/api/containers/{id}/console",     get(routes::ws::ws_console))
         .route("/api/containers/{id}/stats",       get(routes::ws::ws_stats_stream))
-        // ─── Pods ───────────────────────────────────────────────────────
+        // ─── Pods ────────────────────────────────────────────────────────
         .route(
             "/api/pods",
             get(routes::pods::list_pods).post(routes::pods::create_pod),
@@ -180,13 +180,13 @@ async fn main() {
                 .delete(routes::networks::delete_network),
         )
         // ─── Kube ─────────────────────────────────────────────────────
-        .route("/api/kube/deploy",                  post(routes::kube::deploy_kube))
-        .route("/api/kube/stacks",                  get(routes::kube::list_stacks))
-        .route("/api/kube/stacks/{name}/up",         post(routes::kube::stack_up))
-        .route("/api/kube/stacks/{name}/down",       post(routes::kube::stack_down))
-        .route("/api/kube/stacks/{name}",            delete(routes::kube::delete_stack))
-        .route("/api/kube/stacks/{name}/status",     get(routes::kube::stack_status))
-        .route("/api/kube/generate/{pod_id}",        post(routes::kube::generate_kube_from_pod))
+        .route("/api/kube/deploy",               post(routes::kube::deploy_kube))
+        .route("/api/kube/stacks",               get(routes::kube::list_stacks))
+        .route("/api/kube/stacks/{name}/up",      post(routes::kube::stack_up))
+        .route("/api/kube/stacks/{name}/down",    post(routes::kube::stack_down))
+        .route("/api/kube/stacks/{name}",         delete(routes::kube::delete_stack))
+        .route("/api/kube/stacks/{name}/status",  get(routes::kube::stack_status))
+        .route("/api/kube/generate/{pod_id}",     post(routes::kube::generate_kube_from_pod))
         // ─── Files ─────────────────────────────────────────────────────
         .route(
             "/api/pods/{id}/files",
@@ -227,11 +227,12 @@ async fn main() {
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(Extension(api_key))
         .layer(TraceLayer::new_for_http())
-        .layer(cors_layer);
+        .layer(cors_layer)
+        .with_state(state.clone());
 
     tracing::info!("──────────────────────────────────────────");
     tracing::info!("🚀 neoxagent listening on {}", bind_addr);
-    tracing::info!("   Guard:    POST /api/guard/install | POST /api/guard/lift | GET /api/guard/status");
+    tracing::info!("   Guard: POST /api/guard/install | POST /api/guard/lift | GET /api/guard/status");
     tracing::info!("──────────────────────────────────────────");
 
     if state.config.tls.enabled {
@@ -260,7 +261,10 @@ async fn main() {
         axum_server::bind_rustls(addr, tls_config)
             .serve(app.into_make_service())
             .await
-            .unwrap_or_else(|e| { tracing::error!("TLS server error: {}", e); std::process::exit(1); });
+            .unwrap_or_else(|e| {
+                tracing::error!("TLS server error: {}", e);
+                std::process::exit(1);
+            });
     } else {
         tracing::info!("🔓 TLS disabled (plain HTTP)");
 
@@ -273,6 +277,9 @@ async fn main() {
 
         axum::serve(listener, app)
             .await
-            .unwrap_or_else(|e| { tracing::error!("Server error: {}", e); std::process::exit(1); });
+            .unwrap_or_else(|e| {
+                tracing::error!("Server error: {}", e);
+                std::process::exit(1);
+            });
     }
 }
