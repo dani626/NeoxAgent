@@ -77,12 +77,20 @@ fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String
 ///   The sidecar container is started BEFORE pod.start() is called.
 ///   This ensures NEOX_GUARD is active in the shared pod network namespace
 ///   before any main container begins sending traffic.
+///
+/// # udp_mode:
+///   'tcp' (default) — tunnel UDP over TCP SOCKS5 stream. Works with any
+///     standard SOCKS5 proxy. Required for proxies that don't support UDP
+///     ASSOCIATE (most commercial SOCKS5 providers).
+///   'udp' — native SOCKS5 UDP ASSOCIATE. Only use if your proxy explicitly
+///     supports it.
 fn build_tproxy_script(
     proxy_host: &str,
     proxy_port: &str,
     auth_yaml: &str,
     dns_server: &str,
     log_level: &str,
+    udp_mode: &str,
 ) -> String {
     format!(r#"#!/bin/sh
 set -e
@@ -123,6 +131,8 @@ fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # hev-socks5-tproxy config
+# udp_mode: '{udp_mode}' — 'tcp' tunnels UDP over SOCKS5 TCP stream (default,
+# works with any standard proxy). 'udp' uses SOCKS5 UDP ASSOCIATE.
 # ════════════════════════════════════════════════════════════════════════════
 mkdir -p /etc/hev
 cat > /etc/hev/tproxy.yml << 'HEVEOF'
@@ -132,7 +142,7 @@ main:
 socks5:
   port: {proxy_port}
   address: '{proxy_host}'
-  udp: 'udp'
+  udp: '{udp_mode}'
   mark: 438
 {auth_yaml}
 
@@ -246,7 +256,7 @@ ip route add local default dev lo table 100 2>/dev/null || true
 # ════════════════════════════════════════════════════════════════════════════
 remove_neox_guard
 
-echo "[neox-tproxy] iptables rules installed. FAILSAFE active (tcp+udp+icmp). Starting hev..."
+echo "[neox-tproxy] iptables rules installed. FAILSAFE active (tcp+udp+icmp). Starting hev (udp_mode={udp_mode})..."
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer 3 — Watchdog wrapper
@@ -268,6 +278,7 @@ exit 1
         auth_yaml = auth_yaml,
         dns_server = dns_server,
         log_level = log_level,
+        udp_mode = udp_mode,
     )
 }
 
@@ -415,11 +426,13 @@ pub async fn create_pod(
                 .unwrap_or("localhost/neox-tproxy-sidecar:latest");
             let log_level  = proxy.loglevel.as_deref().unwrap_or("warn");
             let dns_server = proxy.dns.as_deref().unwrap_or("8.8.8.8");
+            let udp_mode   = proxy.udp_mode.as_deref().unwrap_or("tcp");
             let sidecar_name = format!("{}-hev-tproxy", req.name);
 
-            tracing::info!("🔌 Creating sidecar '{}' → {}:{} (auth: {})",
+            tracing::info!("🔌 Creating sidecar '{}' → {}:{} (auth: {}, udp_mode: {})",
                 sidecar_name, proxy_host, proxy_port,
-                if proxy_user.is_some() { "yes" } else { "no" });
+                if proxy_user.is_some() { "yes" } else { "no" },
+                udp_mode);
 
             let auth_yaml = match (&proxy_user, &proxy_pass) {
                 (Some(u), Some(p)) =>
@@ -428,7 +441,7 @@ pub async fn create_pod(
             };
 
             let script = build_tproxy_script(
-                &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level,
+                &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level, udp_mode,
             );
 
             let sidecar_opts = ContainerCreateOpts::builder()
@@ -436,8 +449,6 @@ pub async fn create_pod(
                 .image(proxy_image)
                 .pod(req.name.as_str())
                 .privileged(true)
-                // restart_policy: OnFailure (unit variant) + restart_tries: 10
-                // Each restart re-runs the full script, reinstalling NEOX_GUARD first.
                 .restart_policy(ContainerRestartPolicy::OnFailure)
                 .restart_tries(10)
                 .mounts(vec![ContainerMount {
@@ -460,11 +471,6 @@ pub async fn create_pod(
                 .map_err(|e| AppError::Podman(format!(
                     "Failed to create sidecar '{}': {}", sidecar_name, e)))?;
 
-            // ── Race condition fix ────────────────────────────────────────────
-            // Start the sidecar BEFORE pod.start() so NEOX_GUARD is installed
-            // in the shared pod network namespace before any main container
-            // can send traffic. All containers in a pod share one netns, so
-            // iptables rules written by the sidecar protect all of them.
             state.podman.containers().get(&created_sidecar.id).start(None).await
                 .map_err(|e| AppError::Podman(format!(
                     "Failed to start sidecar '{}': {}", sidecar_name, e)))?;
@@ -548,7 +554,6 @@ pub async fn create_pod(
         tracing::info!("✅ Container '{}' created", ctr_name);
     }
 
-    // Start the pod (and remaining containers). Sidecar already running.
     tracing::info!("🚀 Starting pod '{}'", req.name);
     pod.start().await
         .map_err(|e| AppError::Podman(
@@ -864,6 +869,7 @@ pub async fn update_proxy(
         .unwrap_or("localhost/neox-tproxy-sidecar:latest");
     let log_level  = req.proxy.loglevel.as_deref().unwrap_or("warn");
     let dns_server = req.proxy.dns.as_deref().unwrap_or("8.8.8.8");
+    let udp_mode   = req.proxy.udp_mode.as_deref().unwrap_or("tcp");
     let sidecar_name = format!("{}-hev-tproxy-{}",
         pod_name, &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -874,7 +880,7 @@ pub async fn update_proxy(
     };
 
     let script = build_tproxy_script(
-        &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level,
+        &proxy_host, &proxy_port, &auth_yaml, dns_server, log_level, udp_mode,
     );
 
     let sidecar_opts = ContainerCreateOpts::builder()
@@ -882,8 +888,6 @@ pub async fn update_proxy(
         .image(proxy_image)
         .pod(pod_name.as_str())
         .privileged(true)
-        // restart_policy: OnFailure (unit variant) + restart_tries: 10
-        // Each restart reinstalls NEOX_GUARD before lifting it again.
         .restart_policy(ContainerRestartPolicy::OnFailure)
         .restart_tries(10)
         .mounts(vec![ContainerMount {
@@ -906,21 +910,18 @@ pub async fn update_proxy(
         .map_err(|e| AppError::Podman(
             format!("Failed to create sidecar '{}': {}", sidecar_name, e)))?;
 
-    // ── Race condition fix ────────────────────────────────────────────────────
-    // Start sidecar immediately after creation so NEOX_GUARD is installed
-    // in the pod netns before the old rules (from the deleted sidecar) can
-    // be cleared and before any main container sends unproxied traffic.
     state.podman.containers().get(&created.id).start(None).await
         .map_err(|e| AppError::Podman(
             format!("Failed to start sidecar '{}': {}", sidecar_name, e)))?;
 
     set_pod_proxy_label(&pod_name, socks5_url);
 
-    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started",
-        id, sidecar_name);
+    tracing::info!("✅ Proxy updated for pod '{}' → sidecar '{}' started (udp_mode: {})",
+        id, sidecar_name, udp_mode);
     Ok(Json(json!({
         "success": true,
         "message": format!("Proxy updated for pod '{}'", id),
         "sidecar": sidecar_name,
+        "udp_mode": udp_mode,
     })))
 }

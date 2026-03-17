@@ -33,6 +33,11 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub loglevel: Option<String>,
+    /// UDP tunneling mode for hev-socks5-tproxy.
+    /// - 'tcp': tunnel UDP over TCP (default, works with most SOCKS5 proxies
+    ///   that don't support UDP ASSOCIATE)
+    /// - 'udp': native SOCKS5 UDP ASSOCIATE (requires proxy support)
+    pub udp_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
