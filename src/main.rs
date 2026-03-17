@@ -10,6 +10,7 @@
 
 mod auth;
 mod config;
+mod cors;
 mod error;
 mod models;
 mod routes;
@@ -24,7 +25,7 @@ use axum::{
     Extension, Router,
 };
 use podman_api::Podman;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -94,6 +95,24 @@ async fn main() {
 
     let api_key = ApiKey(config.agent.api_key.clone());
     let bind_addr = format!("{}:{}", config.agent.host, config.agent.port);
+
+    // ── Build CORS policy from config ─────────────────────────────────────────
+    let allow_origin = crate::cors::build_allow_origin(config.agent.cors_origins.clone());
+    let cors_layer = CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::ACCEPT,
+        ]);
+
     let state = Arc::new(AppState { podman, config });
 
     let app = Router::new()
@@ -208,13 +227,7 @@ async fn main() {
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(Extension(api_key))
         .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
-        .with_state(state.clone());
+        .layer(cors_layer);
 
     tracing::info!("──────────────────────────────────────────");
     tracing::info!("🚀 neoxagent listening on {}", bind_addr);

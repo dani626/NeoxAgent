@@ -17,6 +17,13 @@ pub struct AgentConfig {
     pub port: u16,
     pub api_key: String,
     pub data_dir: PathBuf,
+    /// Allowed CORS origins. Each entry is either:
+    ///   - An exact origin: "https://panel.neoxhost.com"
+    ///   - A wildcard subdomain pattern: "*.neoxhost.com"
+    ///     (matches any subdomain, with or without https://)
+    /// If the list is empty, ALL origins are allowed (development only).
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
