@@ -15,7 +15,7 @@ use crate::services::podman as podman_service;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
-        .route("/:name", get(inspect_volume).delete(delete_volume))
+        .route("/{name}", get(inspect_volume).delete(delete_volume))
 }
 
 pub async fn list_volumes(
