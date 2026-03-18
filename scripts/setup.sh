@@ -81,10 +81,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 if [ "$MODE" = "reinstall" ]; then
   header "Step 2/7 — Wiping previous installation"
   systemctl stop  "$SERVICE_NAME" 2>/dev/null || true
-  systemctl stop  "neox-guard"    2>/dev/null || true
   systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-  systemctl disable "neox-guard"    2>/dev/null || true
-  rm -f "$BIN_PATH" "$SERVICE_FILE" /etc/systemd/system/neox-guard.service
+  rm -f "$BIN_PATH" "$SERVICE_FILE"
   rm -rf "$INSTALL_DIR"
   systemctl daemon-reload
   ok "Previous installation wiped"
@@ -223,9 +221,8 @@ cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=NeoxAgent — Podman Management Agent
 Documentation=https://github.com/dani626/NeoxAgent
-After=network-online.target podman.socket neox-guard.service
+After=network-online.target podman.socket
 Wants=network-online.target
-Requires=neox-guard.service
 
 [Service]
 Type=simple
@@ -241,31 +238,7 @@ SyslogIdentifier=neoxagent
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/neox-guard.service <<'EOF'
-[Unit]
-Description=Neox host-level container IP leak guard
-Documentation=https://github.com/dani626/NeoxAgent
-Before=podman.service podman-restart.service neoxagent.service network-online.target
-After=network.target
-DefaultDependencies=no
-ConditionPathExists=/sbin/iptables
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/sbin/iptables -I FORWARD 1 -m comment --comment "neox-guard-forward-drop" -j DROP
-ExecStop=/sbin/iptables -D FORWARD -m comment --comment "neox-guard-forward-drop" -j DROP
-ExecStopPost=/sbin/iptables -D FORWARD -m comment --comment "neox-guard-forward-drop" -j DROP
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 systemctl daemon-reload
-systemctl enable neox-guard
-systemctl start  neox-guard
-ok "neox-guard.service enabled and started (FORWARD DROP active)"
-
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 ok "neoxagent.service enabled and started"
@@ -280,26 +253,6 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
-# ─── Step 7: Activate guard via API ───────────────────────────────────────────
-header "Step 7/7 — Activating IP leak guard"
-
-GUARD_RESPONSE=$(curl -sf -X POST \
-  "http://127.0.0.1:${FINAL_PORT}/api/guard/install" \
-  -H "Authorization: Bearer ${FINAL_API_KEY}" \
-  -H "Content-Type: application/json" || echo '{"success":false}')
-
-if echo "$GUARD_RESPONSE" | grep -q '"success":true'; then
-  ok "Guard installed via API"
-else
-  warn "Guard API call failed (service already active via systemd, this is fine)"
-fi
-
-if iptables -C FORWARD -m comment --comment "neox-guard-forward-drop" -j DROP 2>/dev/null; then
-  ok "FORWARD DROP rule is ACTIVE — VPS IP is protected"
-else
-  warn "FORWARD DROP rule not found. Check: journalctl -u neox-guard.service"
-fi
-
 # ─── Done ─────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}┌─────────────────────────────────────────────────────┐${RESET}"
@@ -311,10 +264,8 @@ echo -e "  ${BOLD}API Key:${RESET}    ${YELLOW}${FINAL_API_KEY}${RESET}"
 echo -e "  ${BOLD}Config:${RESET}     ${CONFIG_FILE}"
 echo ""
 echo -e "  ${BOLD}Security:${RESET}"
-echo -e "    ✔ neox-guard.service  — host FORWARD DROP (pre-Podman)"
-echo -e "    ✔ NEOX_GUARD          — pod-level DROP-all gap protection"
+echo ""
 echo -e "    ✔ HEV_FAILSAFE        — permanent kill-switch inside pod netns"
-echo -e "    ✔ Watchdog wrapper    — reinstalls NEOX_GUARD on hev crash"
 if [ ${#CORS_ENTRIES[@]} -gt 0 ]; then
   echo -e "    ✔ CORS               — restricted to ${#CORS_ENTRIES[@]} origin(s)"
 else
@@ -323,7 +274,6 @@ fi
 echo ""
 echo -e "  ${BOLD}Commands:${RESET}"
 echo -e "    systemctl status neoxagent      # agent status"
-echo -e "    systemctl status neox-guard     # guard status"
 echo -e "    journalctl -fu neoxagent        # live logs"
 echo -e "    bash scripts/setup.sh --update  # update to latest"
 echo ""

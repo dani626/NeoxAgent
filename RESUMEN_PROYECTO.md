@@ -7,8 +7,8 @@ El agente está diseñado para ser **Daemonless** (sin procesos en segundo plano
 
 ## Características Principales
 *   **Podman Nativo:** Utiliza la SDK nativa (`podman-api`) para comunicarse con Podman, eliminando la necesidad de Docker y su daemon (`dockerd`).
-*   **Gestión de Pods y hev-socks5-tproxy:** Permite la creación de Pods que encapsulan contenedores (ej. un servidor de Minecraft junto a un sidecar de hev-socks5-tproxy) para compartir la misma red e IP, aislando y protegiendo el tráfico mediante TPROXY transparente con protección NEOX_GUARD (DROP-all gap protection).
-*   **Seguro y Ligero:** Al usar Rust y Podman rootless, el consumo de memoria en reposo es mínimo (~3-5MB RAM), proporcionando alta seguridad perimetral para los contenedores.
+*   **Gestión de Pods y hev-socks5-tproxy:** Permite la creación de Pods que encapsulan contenedores (ej. un servidor de Minecraft junto a un sidecar de hev-socks5-tproxy) para compartir la misma red e IP, aislando y protegiendo el tráfico mediante TPROXY transparente.
+*   **Seguro y Ligero:** Al usar Rust y Podman rootless, el consumo de memoria en reposo es mínimo (~3-5MB RAM), proporcionando alta seguridad para los contenedores.
 *   **Soporte Kubernetes YAML:** Utiliza la compatibilidad nativa de Podman con `play kube` para levantar arquitecturas multicontenedor con archivos YAML, en lugar de depender de Docker Compose.
 
 ## Stack Tecnológico

@@ -120,10 +120,6 @@ async fn main() {
         .route("/api/health", get(routes::system::health))
         .route("/api/system/info", get(routes::system::system_info))
         .route("/api/system/resources", get(routes::system::system_resources))
-        // ─── Guard ────────────────────────────────────────────────────────
-        .route("/api/guard/install", post(routes::guard::install_guard))
-        .route("/api/guard/lift",    post(routes::guard::lift_guard))
-        .route("/api/guard/status",  get(routes::guard::guard_status))
         // ─── Containers ──────────────────────────────────────────────
         .route(
             "/api/containers",
@@ -232,7 +228,6 @@ async fn main() {
 
     tracing::info!("──────────────────────────────────────────");
     tracing::info!("🚀 neoxagent listening on {}", bind_addr);
-    tracing::info!("   Guard: POST /api/guard/install | POST /api/guard/lift | GET /api/guard/status");
     tracing::info!("──────────────────────────────────────────");
 
     if state.config.tls.enabled {

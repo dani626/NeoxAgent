@@ -49,34 +49,20 @@ fn parse_socks5_url(socks5_url: &str) -> (Option<String>, Option<String>, String
 
 /// Builds the bash entrypoint for the hev-socks5-tproxy sidecar.
 ///
+/// Builds the bash entrypoint for the hev-socks5-tproxy sidecar.
+///
 /// # Security model (layered, defense-in-depth)
 ///
-/// Layer 1 — NEOX_GUARD (gap protection):
-///   Installs a DROP-all chain in mangle PREROUTING+OUTPUT as the VERY FIRST
-///   action. Loopback is exempted. This runs on every start/restart, closing
-///   the race window between sidecar death and new sidecar taking over.
-///
-/// Layer 2 — HEV_FAILSAFE (permanent kill-switch):
+/// Layer 1 — HEV_FAILSAFE (permanent kill-switch):
 ///   A separate mangle chain that runs AFTER HEV_TPROXY/HEV_OUTPUT and drops
 ///   any packet that was NOT marked by hev (mark 0x438 or 0x440). This means
 ///   if hev dies and the TPROXY redirect stops working, unredirected packets
 ///   hit FAILSAFE and are dropped — the VPS IP is never exposed.
 ///   ICMP is also dropped so pings cannot reveal the VPS IP when hev is down.
 ///
-/// Layer 3 — Watchdog wrapper:
-///   hev runs inside a loop. If it exits for any reason, the wrapper
-///   immediately reinstalls NEOX_GUARD (blocking all traffic) before sleeping
-///   and letting Podman's restart policy bring the container up again.
-///   Podman restart policy: on-failure with restart_tries=10.
-///
-/// Layer 4 — Proxy-host exclusion:
+/// Layer 2 — Proxy-host exclusion:
 ///   The IP of the upstream SOCKS5 proxy is always excluded from redirection
 ///   so hev itself can reach the proxy server directly.
-///
-/// # Race condition fix (startup ordering):
-///   The sidecar container is started BEFORE pod.start() is called.
-///   This ensures NEOX_GUARD is active in the shared pod network namespace
-///   before any main container begins sending traffic.
 ///
 /// # udp_mode:
 ///   'tcp' (default) — tunnel UDP over TCP SOCKS5 stream. Works with any
@@ -96,33 +82,6 @@ fn build_tproxy_script(
 set -e
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEOX_GUARD — Layer 1: DROP-all gap protection
-# Runs on EVERY start/restart before anything else so no traffic escapes
-# while hev is not yet intercepting.
-# ════════════════════════════════════════════════════════════════════════════
-install_neox_guard() {{
-  iptables -t mangle -N NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -F NEOX_GUARD
-  iptables -t mangle -A NEOX_GUARD -i lo -j RETURN
-  iptables -t mangle -A NEOX_GUARD -j DROP
-  # Insert at position 1 so it runs before any other rule
-  iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -I PREROUTING 1 -j NEOX_GUARD
-  iptables -t mangle -I OUTPUT     1 -j NEOX_GUARD
-}}
-
-remove_neox_guard() {{
-  iptables -t mangle -D PREROUTING -j NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -D OUTPUT     -j NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -F NEOX_GUARD 2>/dev/null || true
-  iptables -t mangle -X NEOX_GUARD 2>/dev/null || true
-}}
-
-# Block everything immediately
-install_neox_guard
-
-# ════════════════════════════════════════════════════════════════════════════
 # Pre-requisites
 # ════════════════════════════════════════════════════════════════════════════
 if ! command -v iptables >/dev/null 2>&1; then
@@ -131,8 +90,6 @@ fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # hev-socks5-tproxy config
-# udp_mode: '{udp_mode}' — 'tcp' tunnels UDP over SOCKS5 TCP stream (default,
-# works with any standard proxy). 'udp' uses SOCKS5 UDP ASSOCIATE.
 # ════════════════════════════════════════════════════════════════════════════
 mkdir -p /etc/hev
 cat > /etc/hev/tproxy.yml << 'HEVEOF'
@@ -214,17 +171,11 @@ iptables -t mangle -A OUTPUT -j HEV_OUTPUT
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer 2 — HEV_FAILSAFE: permanent kill-switch
-# Any packet that was NOT marked by hev (0x438 = hev internal, 0x440 = tproxy)
-# and is NOT loopback or private gets DROPPED here. This is the last line of
-# defense if hev dies and the TPROXY redirect stops working.
-# ICMP is also dropped to prevent VPS IP discovery via ping when hev is down.
 # ════════════════════════════════════════════════════════════════════════════
 iptables -t mangle -N HEV_FAILSAFE 2>/dev/null || true
 iptables -t mangle -F HEV_FAILSAFE
-# Allow hev's own marked packets
 iptables -t mangle -A HEV_FAILSAFE -m mark --mark 0x438 -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -m mark --mark 0x440 -j RETURN
-# Allow loopback and RFC-1918 / special ranges (intra-pod comms)
 iptables -t mangle -A HEV_FAILSAFE -d 0.0.0.0/8     -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 10.0.0.0/8    -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 127.0.0.0/8   -j RETURN
@@ -233,13 +184,10 @@ iptables -t mangle -A HEV_FAILSAFE -d 172.16.0.0/12  -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 224.0.0.0/4   -j RETURN
 iptables -t mangle -A HEV_FAILSAFE -d 240.0.0.0/4   -j RETURN
-# Allow outbound to the proxy server itself (hev needs to reach it directly)
 iptables -t mangle -A HEV_FAILSAFE -d {proxy_host}   -j RETURN
-# DROP everything else — tcp, udp AND icmp — if hev is dead, nothing leaks
 iptables -t mangle -A HEV_FAILSAFE -p tcp  -j DROP
 iptables -t mangle -A HEV_FAILSAFE -p udp  -j DROP
 iptables -t mangle -A HEV_FAILSAFE -p icmp -j DROP
-# Attach AFTER HEV_TPROXY/HEV_OUTPUT so normal hev traffic is never blocked
 iptables -t mangle -D PREROUTING -j HEV_FAILSAFE 2>/dev/null || true
 iptables -t mangle -D OUTPUT     -j HEV_FAILSAFE 2>/dev/null || true
 iptables -t mangle -A PREROUTING -j HEV_FAILSAFE
@@ -251,26 +199,15 @@ iptables -t mangle -A OUTPUT     -j HEV_FAILSAFE
 ip rule add fwmark 0x440 table 100 2>/dev/null || true
 ip route add local default dev lo table 100 2>/dev/null || true
 
-# ════════════════════════════════════════════════════════════════════════════
-# Lift NEOX_GUARD — hev_FAILSAFE is now the permanent safety net
-# ════════════════════════════════════════════════════════════════════════════
-remove_neox_guard
-
 echo "[neox-tproxy] iptables rules installed. FAILSAFE active (tcp+udp+icmp). Starting hev (udp_mode={udp_mode})..."
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer 3 — Watchdog wrapper
-# If hev exits for ANY reason, reinstall NEOX_GUARD immediately so no traffic
-# can escape before Podman's restart policy brings the container back up.
-# The container exits with code 1 so Podman (restart: on-failure) retries.
 # ════════════════════════════════════════════════════════════════════════════
 /usr/local/bin/hev-socks5-tproxy /etc/hev/tproxy.yml
 EXIT_CODE=$?
 
-echo "[neox-tproxy] hev-socks5-tproxy exited with code $EXIT_CODE — reinstalling NEOX_GUARD"
-install_neox_guard
-
-echo "[neox-tproxy] NEOX_GUARD active. Exiting with code 1 to trigger Podman restart."
+echo "[neox-tproxy] hev-socks5-tproxy exited with code $EXIT_CODE"
 exit 1
 "#,
         proxy_port = proxy_port,
@@ -372,9 +309,8 @@ pub async fn list_pods(
 /// POST /api/pods
 ///
 /// # Startup ordering (race condition fix):
-///   When proxy is enabled, the sidecar container is started FIRST before
 ///   pod.start() is called. Since all containers in a pod share the same
-///   network namespace, NEOX_GUARD is active in that namespace before any
+///   network namespace before any
 ///   main container process can send a single packet.
 pub async fn create_pod(
     State(state): State<Arc<AppState>>,
@@ -474,7 +410,7 @@ pub async fn create_pod(
             state.podman.containers().get(&created_sidecar.id).start(None).await
                 .map_err(|e| AppError::Podman(format!(
                     "Failed to start sidecar '{}': {}", sidecar_name, e)))?;
-            tracing::info!("✅ Sidecar '{}' started first — NEOX_GUARD active",
+            tracing::info!("✅ Sidecar '{}' started first",
                 sidecar_name);
 
             sidecar_id = Some(created_sidecar.id);
@@ -817,13 +753,9 @@ pub async fn rename_pod(
 ///
 /// Security sequence when changing proxy:
 ///   1. Inspect pod to find existing sidecar(s).
-///   2. Force-delete old sidecar — its iptables rules stay in the kernel
-///      (HEV_TPROXY still redirects, but nobody listens → packets dropped).
-///   3. Create AND START new sidecar first — script installs NEOX_GUARD
-///      immediately, so there is no gap between old sidecar death and new
-///      sidecar taking over.
+///   2. Force-delete old sidecar.
+///   3. Create AND START new sidecar.
 ///   4. pod.start() / running containers continue under new proxy rules.
-///   At no point does unproxied traffic reach the internet.
 pub async fn update_proxy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

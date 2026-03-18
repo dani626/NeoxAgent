@@ -8,7 +8,6 @@ NeoxAgent runs on each VPS node and exposes a REST + WebSocket API to manage con
 
 - **Podman-native** — uses the `podman-api` Rust SDK, no Docker
 - **Pod + proxy support** — creates pods with a `hev-socks5-tproxy` sidecar for transparent SOCKS5 proxying, VPS IP is never exposed
-- **Multi-layer IP leak protection** — `neox-guard.service` (host) + `NEOX_GUARD` + `HEV_FAILSAFE` + watchdog wrapper
 - **Real-time WebSockets** — container logs, interactive console, stats stream
 - **Kubernetes YAML** — deploy stacks via `podman play kube`
 - **File Manager** — list, read, write, upload, download, rename inside pods
@@ -39,9 +38,7 @@ The script will:
 2. Install Rust if not present
 3. Ask for port, API key (auto-generated if left blank), Podman socket, data dirs and TLS config
 4. Compile the binary (`cargo build --release`)
-5. Install and enable `neox-guard.service` (host-level IP leak guard, runs before Podman on boot)
-6. Install and enable `neoxagent.service`
-7. Activate the guard via the API
+5. Install and enable `neoxagent.service`
 
 At the end it prints your **API key** and **node URL**.
 
@@ -110,13 +107,6 @@ curl http://NODE_IP:8443/api/health \
 | GET | `/api/health` | Health check |
 | GET | `/api/system/info` | Podman + host info |
 | GET | `/api/system/resources` | CPU / RAM usage |
-
-### IP Leak Guard
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/guard/install` | Install + enable `neox-guard.service` |
-| POST | `/api/guard/lift` | Remove FORWARD DROP rule (called after proxy is healthy) |
-| GET | `/api/guard/status` | Check if guard rule is active |
 
 ### Containers
 | Method | Path | Description |
@@ -212,30 +202,11 @@ curl http://NODE_IP:8443/api/health \
 | POST | `/api/pods/{id}/systemd/disable` | Disable auto-start |
 | GET | `/api/pods/{id}/systemd/status` | Service status |
 
-## IP Leak Protection Architecture
-
-When a pod has a proxy enabled, traffic is protected by 4 layers:
-
-```
-VPS boot
-  └─ neox-guard.service     → iptables FORWARD DROP (before Podman starts)
-       └─ pod starts
-            └─ sidecar hev-socks5-tproxy
-                 ├─ NEOX_GUARD     (DROP-all inside pod netns, installed first)
-                 ├─ HEV_TPROXY    (redirects all traffic through SOCKS5)
-                 ├─ HEV_FAILSAFE  (drops unmarked packets if hev dies)
-                 └─ /api/guard/lift  (removes host FORWARD DROP)
-```
-
 ## Useful Commands
 
 ```bash
 # Check agent status
 systemctl status neoxagent
-
-# Check IP guard status
-systemctl status neox-guard
-iptables -L FORWARD -n | grep neox-guard
 
 # Live agent logs
 journalctl -fu neoxagent
@@ -258,7 +229,6 @@ NeoxAgent/
 │   ├── error.rs         # AppError types
 │   ├── models/          # Request/response structs
 │   ├── routes/
-│   │   ├── guard.rs       # IP leak guard endpoints
 │   │   ├── pods.rs        # Pod CRUD + hev-socks5-tproxy
 │   │   ├── containers.rs  # Container CRUD + lifecycle
 │   │   ├── ws.rs          # WebSocket handlers
