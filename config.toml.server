@@ -1,0 +1,31 @@
+[agent]
+host = "0.0.0.0"
+port = 8443
+api_key = "b1b1c9533ce2e64be49bc2245c8d6480705b9645a9aeea2bdba2e36fb347960f"
+data_dir = "/srv/neox/servers"
+
+cors_origins = [
+  "https://panel.neoxhost.com",
+  "*.neoxhost.com",
+  "http://localhost:3000",
+]
+
+[podman]
+socket = "/run/user/1000/podman/podman.sock"
+volumes_dir = "/srv/neox/servers/servers"
+
+[tls]
+enabled = false
+cert_path = "/etc/letsencrypt/live/nyc001.neoxhost.com/fullchain.pem"
+key_path = "/etc/letsencrypt/live/nyc001.neoxhost.com/privkey.pem"
+
+[defaults]
+restart_policy = "always"
+dns = ["1.1.1.1", "8.8.8.8"]
+
+[backups]
+max_per_server = 5
+max_size_gb = 10
+retention_days = 30
+compression_level = 6
+stop_server_before_backup = true
