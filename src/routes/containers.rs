@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::models::container::{
-    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery,
+    CreateContainerRequest, DeleteContainerQuery, StopContainerQuery, LogsQuery, RenameContainerRequest,
 };
 use crate::services::podman;
 use crate::AppState;
@@ -30,7 +30,6 @@ pub async fn create_container(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateContainerRequest>,
 ) -> Result<Json<Value>, AppError> {
-    // Validate required fields
     if req.name.is_empty() {
         return Err(AppError::BadRequest("Container name is required".into()));
     }
@@ -38,11 +37,11 @@ pub async fn create_container(
         return Err(AppError::BadRequest("Image is required".into()));
     }
 
-    tracing::info!("📦 Creating container '{}' with image '{}'", req.name, req.image);
+    tracing::info!("\u{1f4e6} Creating container '{}' with image '{}'", req.name, req.image);
 
     let response = podman::create_container(&state, req).await?;
 
-    tracing::info!("✅ Container '{}' created: {}", response.name, response.id);
+    tracing::info!("\u{2705} Container '{}' created: {}", response.name, response.id);
 
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
@@ -58,18 +57,42 @@ pub async fn get_container(
 }
 
 /// DELETE /api/containers/:id
-/// Deletes a container. Optionally removes associated volumes and forces deletion.
+/// Deletes a container. If the container is running it will be stopped first.
+/// Passing `force=true` skips the graceful stop and uses Podman's force flag directly.
 pub async fn delete_container(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<DeleteContainerQuery>,
 ) -> Result<Json<Value>, AppError> {
     tracing::info!(
-        "🗑️  Deleting container '{}' (force={}, remove_volumes={})",
+        "\u{1f5d1}\u{fe0f}  Deleting container '{}' (force={}, remove_volumes={})",
         id,
         query.force,
         query.remove_volumes
     );
+
+    // If force was not explicitly requested, check whether the container is running.
+    // If it is, stop it gracefully first so Podman doesn't reject the delete.
+    if !query.force {
+        let is_running = state
+            .podman
+            .containers()
+            .get(&id)
+            .inspect()
+            .await
+            .ok()
+            .and_then(|info| info.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false);
+
+        if is_running {
+            tracing::info!(
+                "\u{23f9}\u{fe0f}  Container '{}' is running \u{2014} stopping before delete",
+                id
+            );
+            podman::stop_container(&state, &id, Some(10)).await.ok(); // 10 s grace, ignore errors
+        }
+    }
 
     podman::delete_container(&state, &id, query.force, query.remove_volumes).await?;
 
@@ -86,7 +109,7 @@ pub async fn start_container(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("▶️  Starting container '{}'", id);
+    tracing::info!("\u{25b6}\u{fe0f}  Starting container '{}'", id);
     podman::start_container(&state, &id).await?;
 
     Ok(Json(json!({
@@ -103,7 +126,7 @@ pub async fn stop_container(
     Path(id): Path<String>,
     Query(query): Query<StopContainerQuery>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("⏹️  Stopping container '{}' (timeout={:?})", id, query.timeout);
+    tracing::info!("\u{23f9}\u{fe0f}  Stopping container '{}' (timeout={:?})", id, query.timeout);
     podman::stop_container(&state, &id, query.timeout).await?;
 
     Ok(Json(json!({
@@ -119,7 +142,7 @@ pub async fn restart_container(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("🔄 Restarting container '{}'", id);
+    tracing::info!("\u{1f504} Restarting container '{}'", id);
     podman::restart_container(&state, &id).await?;
 
     Ok(Json(json!({
@@ -135,7 +158,7 @@ pub async fn kill_container(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("💀 Killing container '{}'", id);
+    tracing::info!("\u{1f480} Killing container '{}'", id);
     podman::kill_container(&state, &id).await?;
 
     Ok(Json(json!({
@@ -143,4 +166,36 @@ pub async fn kill_container(
         "message": format!("Container '{}' killed", id),
         "container_id": id,
     })))
+}
+
+/// POST /api/containers/:id/rename
+/// Renames a container.
+pub async fn rename_container(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RenameContainerRequest>,
+) -> Result<Json<Value>, AppError> {
+    if req.name.is_empty() {
+        return Err(AppError::BadRequest("New container name is required".into()));
+    }
+
+    tracing::info!("\u{1f3f7}\u{fe0f} Renaming container '{}' to '{}'", id, req.name);
+    state.podman.containers().get(&id).rename(&req.name).await
+        .map_err(|e| AppError::Podman(format!("Failed to rename container: {}", e)))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": format!("Container '{}' renamed to '{}'", id, req.name),
+        "container_id": id,
+        "new_name": req.name,
+    })))
+}
+
+/// GET /api/containers/:id/logs
+pub async fn get_container_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<String, AppError> {
+    podman::get_container_logs(&state, &id, query.tail).await
 }

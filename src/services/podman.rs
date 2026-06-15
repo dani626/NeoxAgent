@@ -3,6 +3,7 @@ use std::sync::Arc;
 use podman_api::opts::{
     ContainerCreateOpts, ContainerDeleteOpts, ContainerListOpts, ContainerStopOpts,
     ContainerRestartPolicy,
+    VolumeCreateOpts, VolumeListOpts,
 };
 use podman_api::models::PortMapping as PodmanPortMapping;
 
@@ -10,28 +11,22 @@ use crate::error::AppError;
 use crate::models::container::{
     ContainerResponse, CreateContainerRequest, PortMapping, ResourceLimits,
 };
+use crate::models::volume::{VolumeResponse, CreateVolumeRequest};
 use crate::AppState;
 
 /// Creates a container from the API request using Podman's native SDK.
-///
-/// This translates our clean API model into Podman's ContainerCreateOpts,
-/// applying environment variables, port mappings, volume mounts, resource limits,
-/// labels, DNS and restart policy.
 pub async fn create_container(
     state: &Arc<AppState>,
     req: CreateContainerRequest,
 ) -> Result<ContainerResponse, AppError> {
-    // Start building the container create options
     let mut builder = ContainerCreateOpts::builder()
         .name(&req.name)
         .image(&req.image);
 
-    // Environment variables
     if !req.env.is_empty() {
         builder = builder.env(req.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
 
-    // Port mappings
     if !req.ports.is_empty() {
         let port_mappings: Vec<PodmanPortMapping> = req
             .ports
@@ -47,7 +42,6 @@ pub async fn create_container(
         builder = builder.portmappings(port_mappings);
     }
 
-    // Volume mounts (as bind mounts via the "mounts" field)
     if !req.volumes.is_empty() {
         let mounts: Vec<podman_api::models::ContainerMount> = req
             .volumes
@@ -64,7 +58,6 @@ pub async fn create_container(
         builder = builder.mounts(mounts);
     }
 
-    // Resource limits (memory + CPU)
     if let Some(ref limits) = req.limits {
         let memory = limits.memory_mb.map(|memory_mb| {
             let memory_bytes = (memory_mb as i64) * 1024 * 1024;
@@ -81,7 +74,6 @@ pub async fn create_container(
         });
 
         let cpu = limits.cpu_cores.map(|cpu_cores| {
-            // CPU quota: cores * period (default period is 100000 microseconds)
             let period: u64 = 100_000;
             let quota = (cpu_cores * period as f64) as i64;
             podman_api::models::LinuxCpu {
@@ -110,18 +102,25 @@ pub async fn create_container(
         builder = builder.resource_limits(linux_resources);
     }
 
-    // Labels — always add neox.managed = true
     let mut labels = req.labels.clone();
     labels.entry("neox.managed".to_string()).or_insert_with(|| "true".to_string());
+
+    if let Some(ref limits) = req.limits {
+        if let Some(speed) = limits.network_speed_mbps {
+            labels.insert("neox.network.speed_mbps".to_string(), speed.to_string());
+        }
+        if let Some(disk) = limits.disk_mb {
+            labels.insert("neox.disk_mb".to_string(), disk.to_string());
+        }
+    }
+
     builder = builder.labels(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
-    // DNS servers from config defaults
     let dns_servers = state.config.defaults.dns.clone();
     if !dns_servers.is_empty() {
         builder = builder.dns_server(dns_servers.iter().map(|s| s.as_str()));
     }
 
-    // Restart policy
     let restart_policy_str = req
         .restart_policy
         .as_deref()
@@ -136,8 +135,21 @@ pub async fn create_container(
     };
     builder = builder.restart_policy(restart_policy);
 
-    // Build and create
-    let opts = builder.build();
+    if let Some(ref entrypoint) = req.entrypoint {
+        if !entrypoint.is_empty() {
+            tracing::info!("🛠️ Overriding entrypoint to: {:?}", entrypoint);
+            builder = builder.entrypoint(entrypoint.iter().map(|s| s.as_str()));
+        }
+    }
+
+    if !req.command.is_empty() {
+        tracing::info!("🛠️ Overriding command to: {:?}", req.command);
+        builder = builder.command(req.command.iter().map(|s| s.as_str()));
+    }
+
+    let temp_name = format!("{}-tmp-{}", req.name, uuid::Uuid::new_v4().to_string()[..8].to_string());
+    let opts = builder.name(&temp_name).build();
+
     let container = state
         .podman
         .containers()
@@ -145,12 +157,16 @@ pub async fn create_container(
         .await
         .map_err(|e| AppError::Podman(format!("Failed to create container: {}", e)))?;
 
+    let short_id = &container.id[..12];
+    let final_name = format!("{}-{}", req.name, short_id);
+
+    tracing::info!("🏷️ Renaming container {} to {}", container.id, final_name);
+
+    state.podman.containers().get(&container.id).rename(&final_name).await
+        .map_err(|e| AppError::Podman(format!("Failed to rename container: {}", e)))?;
+
     let container_id = container.id.clone();
-
-    // Build port mapping response
     let ports: Vec<PortMapping> = req.ports;
-
-    // Build limits response
     let limits = req.limits;
 
     Ok(ContainerResponse {
@@ -158,7 +174,7 @@ pub async fn create_container(
         name: req.name,
         image: req.image,
         status: "created".to_string(),
-        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        created_at: Some(crate::time_utils::now_rfc3339()),
         ports,
         limits,
         labels,
@@ -194,7 +210,6 @@ pub async fn inspect_container(
 
     let created_at = inspect.created.map(|t| t.to_rfc3339());
 
-    // Extract port mappings from host config
     let ports: Vec<PortMapping> = inspect
         .host_config
         .as_ref()
@@ -203,7 +218,6 @@ pub async fn inspect_container(
             bindings
                 .iter()
                 .flat_map(|(container_port_proto, host_bindings)| {
-                    // container_port_proto is like "25565/tcp"
                     let parts: Vec<&str> = container_port_proto.split('/').collect();
                     let container_port = parts
                         .first()
@@ -235,7 +249,6 @@ pub async fn inspect_container(
         })
         .unwrap_or_default();
 
-    // Extract memory limit
     let memory_limit = inspect
         .host_config
         .as_ref()
@@ -243,7 +256,6 @@ pub async fn inspect_container(
         .filter(|&m| m > 0)
         .map(|m| (m / 1024 / 1024) as u64);
 
-    // Extract CPU from NanoCpus
     let cpu_cores = inspect
         .host_config
         .as_ref()
@@ -251,21 +263,30 @@ pub async fn inspect_container(
         .filter(|&c| c > 0)
         .map(|c| c as f64 / 1_000_000_000.0);
 
-    let limits = if memory_limit.is_some() || cpu_cores.is_some() {
-        Some(ResourceLimits {
-            memory_mb: memory_limit,
-            cpu_cores,
-            disk_mb: None,
-        })
-    } else {
-        None
-    };
-
     let labels = inspect
         .config
         .as_ref()
         .and_then(|c| c.labels.clone())
         .unwrap_or_default();
+
+    let network_speed_mbps = labels
+        .get("neox.network.speed_mbps")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let disk_mb = labels
+        .get("neox.disk_mb")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let limits = if memory_limit.is_some() || cpu_cores.is_some() || network_speed_mbps.is_some() || disk_mb.is_some() {
+        Some(ResourceLimits {
+            memory_mb: memory_limit,
+            cpu_cores,
+            disk_mb,
+            network_speed_mbps,
+        })
+    } else {
+        None
+    };
 
     Ok(ContainerResponse {
         id: inspect.id.unwrap_or_default(),
@@ -342,6 +363,34 @@ pub async fn start_container(
         .start(None)
         .await
         .map_err(|e| AppError::Podman(format!("Failed to start container '{}': {}", id, e)))?;
+
+    if let Ok(inspect) = inspect_container(state, id).await {
+        if let Some(limits) = inspect.limits {
+            if let Some(speed) = limits.network_speed_mbps {
+                if speed > 0 {
+                    if let Ok(raw_inspect) = container.inspect().await {
+                        if let Some(c_state) = raw_inspect.state {
+                            if let Some(pid) = c_state.pid {
+                                if pid > 0 {
+                                    let _ = std::process::Command::new("nsenter")
+                                        .args(&[
+                                            "-t", &pid.to_string(),
+                                            "-n",
+                                            "tc", "qdisc", "replace", "dev", "eth0", "root", "tbf",
+                                            "rate", &format!("{}mbit", speed),
+                                            "burst", "32kbit",
+                                            "latency", "400ms"
+                                        ])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -390,4 +439,124 @@ pub async fn kill_container(
         .await
         .map_err(|e| AppError::Podman(format!("Failed to kill container '{}': {}", id, e)))?;
     Ok(())
+}
+
+/// Fetches logs from a container.
+pub async fn get_container_logs(
+    state: &Arc<AppState>,
+    id: &str,
+    tail: Option<usize>,
+) -> Result<String, AppError> {
+    use futures_util::StreamExt;
+    use podman_api::opts::ContainerLogsOpts;
+
+    let container = state.podman.containers().get(id);
+    let mut opts_builder = ContainerLogsOpts::builder()
+        .stdout(true)
+        .stderr(true);
+
+    if let Some(t) = tail {
+        opts_builder = opts_builder.tail(t.to_string());
+    }
+
+    let opts = opts_builder.build();
+    let mut logs = container.logs(&opts);
+    let mut output = String::new();
+
+    while let Some(chunk) = logs.next().await {
+        match chunk {
+            Ok(chunk) => {
+                let data = match chunk {
+                    podman_api::conn::TtyChunk::StdOut(d) => d,
+                    podman_api::conn::TtyChunk::StdErr(d) => d,
+                    podman_api::conn::TtyChunk::StdIn(d) => d,
+                };
+                let text = String::from_utf8_lossy(&data);
+                output.push_str(&text);
+            }
+            Err(e) => return Err(AppError::Podman(format!("Error reading logs: {}", e))),
+        }
+    }
+
+    Ok(output)
+}
+
+/// Fetches logs from a pod (all containers).
+pub async fn get_pod_logs(
+    _state: &Arc<AppState>,
+    _id: &str,
+    _tail: Option<usize>,
+) -> Result<String, AppError> {
+    Err(AppError::Podman("Pod logs stream not natively supported by Podman API".to_string()))
+}
+
+// ─── Volumes ───────────────────────────────────────────
+
+// list_volumes: struct ListVolume tiene campos String y HashMap directos (sin Option)
+pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, AppError> {
+    let opts = VolumeListOpts::builder().build();
+    let volumes = state.podman.volumes().list(&opts).await
+        .map_err(|e| AppError::Podman(format!("Failed to list volumes: {}", e)))?;
+
+    let list = volumes.iter().map(|v| VolumeResponse {
+        name:        v.name.clone(),
+        driver:      v.driver.clone(),
+        mountpoint:  v.mountpoint.clone(),
+        created_at:  v.created_at.clone(),
+        labels:      v.labels.clone(),
+        options:     v.options.clone(),
+    }).collect();
+
+    Ok(list)
+}
+
+// create_volume: struct VolumeConfigResponse tiene campos Option<String>, Option<DateTime<Utc>>, Option<HashMap>
+pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> Result<VolumeResponse, AppError> {
+    let mut builder = VolumeCreateOpts::builder().name(&req.name);
+
+    if let Some(ref driver) = req.driver {
+        builder = builder.driver(driver);
+    }
+
+    if let Some(ref labels) = req.labels {
+        builder = builder.labels(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+
+    if let Some(ref options) = req.options {
+        builder = builder.options(options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+
+    let opts = builder.build();
+    let volume = state.podman.volumes().create(&opts).await
+        .map_err(|e| AppError::Podman(format!("Failed to create volume: {}", e)))?;
+
+    Ok(VolumeResponse {
+        name:        volume.name.clone().unwrap_or_default(),
+        driver:      volume.driver.clone().unwrap_or_default(),
+        mountpoint:  volume.mountpoint.clone().unwrap_or_default(),
+        created_at:  volume.created_at.map(|dt| dt.to_rfc3339()),
+        labels:      volume.labels.clone().unwrap_or_default(),
+        options:     volume.options.clone().unwrap_or_default(),
+    })
+}
+
+pub async fn delete_volume(state: &Arc<AppState>, name: &str, _force: bool) -> Result<(), AppError> {
+    state.podman.volumes().get(name).remove().await
+        .map_err(|e| AppError::Podman(format!("Failed to delete volume '{}': {}", name, e)))?;
+    Ok(())
+}
+
+// inspect_volume: struct InspectVolumeData tiene campos String y HashMap directos (sin Option)
+pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeResponse, AppError> {
+    let volume = state.podman.volumes().get(name).inspect().await
+        .map_err(|e| AppError::Podman(format!("Failed to inspect volume '{}': {}", name, e)))?;
+
+    Ok(VolumeResponse {
+        name:        volume.name.clone(),
+        driver:      volume.driver.clone(),
+        mountpoint:  volume.mountpoint.clone(),
+        created_at:  volume.created_at.clone(),
+        labels:      volume.labels.clone(),
+        options:     volume.options.clone(),
+    })
 }

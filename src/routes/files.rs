@@ -128,16 +128,7 @@ fn format_modified(metadata: &std::fs::Metadata) -> String {
     metadata
         .modified()
         .ok()
-        .and_then(|t| {
-            let duration = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?;
-            let dt = chrono::DateTime::from_timestamp(
-                duration.as_secs() as i64,
-                duration.subsec_nanos(),
-            )?;
-            Some(dt.to_rfc3339())
-        })
+        .map(|t| crate::time_utils::system_time_to_rfc3339(t))
         .unwrap_or_default()
 }
 

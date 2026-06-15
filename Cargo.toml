@@ -1,6 +1,6 @@
 [package]
 name = "neoxagent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight Podman management agent for Jexactyl panel"
 authors = ["neoxhost"]
@@ -11,11 +11,12 @@ podman-api = "0.10"
 
 # Web Server
 axum = { version = "0.8", features = ["ws", "multipart"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Async
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "process", "fs", "time", "sync"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 
@@ -31,7 +32,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utils
 uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
 
 # Compression (backups)
 tar = "0.4"

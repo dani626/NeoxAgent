@@ -4,6 +4,19 @@ port = 8443
 api_key = "change-me-to-a-secure-random-string"
 data_dir = "/home/dani626/neox_data"
 
+# CORS allowed origins.
+# Supports exact origins and wildcard subdomain patterns.
+# Examples:
+#   "https://panel.neoxhost.com"   → exact match
+#   "*.neoxhost.com"               → any subdomain of neoxhost.com
+#   "http://localhost:3000"        → local dev
+# Leave empty ([]) to allow ALL origins (development only — not safe for production).
+cors_origins = [
+  "https://panel.neoxhost.com",
+  "*.neoxhost.com",
+  "http://localhost:3000",
+]
+
 [podman]
 socket = "/tmp/podman_demo_dani626.sock"
 volumes_dir = "/home/dani626/neox_servers"

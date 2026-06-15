@@ -1,0 +1,37 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build NeoxAgent (Linux x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libssl-dev
+
+    - name: Build release
+      run: cargo build --release
+
+    - name: Compress binary (UPX)
+      run: |
+        sudo apt-get install -y upx-ucl
+        upx --best --lzma target/release/neoxagent
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: neoxagent-linux-x64
+        path: target/release/neoxagent
+        if-no-files-found: error

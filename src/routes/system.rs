@@ -48,6 +48,27 @@ pub async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
                 .and_then(|h| h.cgroup_version.as_deref())
                 .unwrap_or("unknown");
 
+            // Disk info via df for the agent's data directory
+            let mut disk_total_gb = 0.0;
+            if let Ok(output) = tokio::process::Command::new("df")
+                .arg("-B1")
+                .arg(&state.config.agent.data_dir)
+                .output()
+                .await
+            {
+                if let Ok(out_str) = String::from_utf8(output.stdout) {
+                    let lines: Vec<&str> = out_str.lines().collect();
+                    if lines.len() >= 2 {
+                        let parts: Vec<&str> = lines[1].split_whitespace().collect();
+                        if parts.len() >= 6 {
+                            if let Ok(total) = parts[1].parse::<f64>() {
+                                disk_total_gb = total / 1024.0 / 1024.0 / 1024.0;
+                            }
+                        }
+                    }
+                }
+            }
+
             Json(json!({
                 "os": host.and_then(|h| h.os.as_deref()).unwrap_or("unknown"),
                 "arch": host.and_then(|h| h.arch.as_deref()).unwrap_or("unknown"),
@@ -68,6 +89,7 @@ pub async fn system_info(State(state): State<Arc<AppState>>) -> Json<Value> {
                     .unwrap_or(false),
                 "cpu_cores": cpu_cores,
                 "memory_total_mb": memory_total_mb,
+                "disk_total_gb": disk_total_gb,
                 "cgroup_version": cgroup_version,
             }))
         }
@@ -112,12 +134,37 @@ pub async fn system_resources(State(state): State<Arc<AppState>>) -> Json<Value>
                 .copied()
                 .unwrap_or(0);
 
+            // Disk info (lightweight approach: parse df output for the data dir)
+            let mut disk_total_gb = 0.0;
+            let mut disk_used_gb = 0.0;
+            if let Ok(output) = tokio::process::Command::new("df")
+                .arg("-B1") // Output in 1-byte blocks
+                .arg(&state.config.agent.data_dir)
+                .output()
+                .await
+            {
+                if let Ok(out_str) = String::from_utf8(output.stdout) {
+                    let lines: Vec<&str> = out_str.lines().collect();
+                    if lines.len() >= 2 {
+                        let parts: Vec<&str> = lines[1].split_whitespace().collect();
+                        if parts.len() >= 6 {
+                            if let (Ok(total), Ok(used)) = (parts[1].parse::<f64>(), parts[2].parse::<f64>()) {
+                                disk_total_gb = total / 1024.0 / 1024.0 / 1024.0;
+                                disk_used_gb = used / 1024.0 / 1024.0 / 1024.0;
+                            }
+                        }
+                    }
+                }
+            }
+
             Json(json!({
                 "memory_total_mb": mem_total_mb,
                 "memory_used_mb": mem_used_mb,
                 "memory_free_mb": mem_free_mb,
                 "swap_total_mb": swap_total / 1024 / 1024,
                 "swap_free_mb": swap_free / 1024 / 1024,
+                "disk_total_gb": disk_total_gb,
+                "disk_used_gb": disk_used_gb,
             }))
         }
         Err(e) => Json(json!({

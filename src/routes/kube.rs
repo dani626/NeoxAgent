@@ -74,7 +74,7 @@ pub async fn deploy_kube(
     // Save deployment metadata
     let metadata = json!({
         "name": stack_name,
-        "deployed_at": chrono::Utc::now().to_rfc3339(),
+        "deployed_at": crate::time_utils::now_rfc3339(),
         "labels": req.labels,
         "resource_name": resource_name,
         "start": req.start,
