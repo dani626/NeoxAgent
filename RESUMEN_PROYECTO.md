@@ -1,36 +1,33 @@
 # Resumen del Proyecto: neoxagent
 
-## ¿Qué es neoxagent?
-**neoxagent** es un agente de nodo escrito en **Rust** diseñado para interactuar de forma nativa con **Podman**. Su objetivo principal es actuar como un reemplazo ligero, eficiente y seguro para *Pterodactyl Wings*, diseñado específicamente para integrarse con el panel *Jexactyl* (basado en Next.js).
+**neoxagent** es un agente de nodo ligero y seguro escrito en **Rust** para la administración nativa de contenedores y pods a través de **Podman**, diseñado como reemplazo para *Pterodactyl Wings* para integrarse con el panel *Jexactyl* (Next.js).
 
-El agente está diseñado para ser **Daemonless** (sin procesos en segundo plano consumiendo memoria pasivamente) y **Rootless** (más seguro por diseño), administrando así servidores de juegos, aplicaciones en contenedores, redes con *tun2socks* (a través de Pods) y despliegues mediante *Kubernetes YAML*.
+Toda la documentación detallada del proyecto, incluyendo su stack tecnológico, la descripción minuciosa de cada característica de la API, las características desactivadas y la comparativa de características faltantes respecto a Pterodactyl Wings se encuentra disponible en el [README.md](file:///c:/proyectos/NeoxAgent/README.md).
 
-## Características Principales
-*   **Podman Nativo:** Utiliza la SDK nativa (`podman-api`) para comunicarse con Podman, eliminando la necesidad de Docker y su daemon (`dockerd`).
-*   **Gestión de Pods y tun2socks:** Permite la creación de Pods que encapsulan contenedores (ej. un servidor de Minecraft junto a un sidecar de tun2socks) para compartir la misma red e IP, aislando y protegiendo el tráfico.
-*   **Seguro y Ligero:** Al usar Rust y Podman rootless, el consumo de memoria en reposo es mínimo (~3-5MB RAM), proporcionando alta seguridad perimetral para los contenedores.
-*   **Soporte Kubernetes YAML:** Utiliza la compatibilidad nativa de Podman con `play kube` para levantar arquitecturas multicontenedor con archivos YAML, en lugar de depender de Docker Compose.
+---
 
-## Stack Tecnológico
-*   **Lenguaje:** Rust.
-*   **API y WebSockets:** `axum` y `tokio-tungstenite`.
-*   **Runtime Asíncrono:** `tokio`.
-*   **Comunicación con Contenedores:** `podman-api`.
-*   **Serialización y Configuración:** `serde`, `serde_json`, `serde_yaml`, y `toml`.
+## 📋 Resumen Rápido de Estado
 
-## Estado Actual (Según Documentación)
-El proyecto ha completado formalmente la **Fase 1** y tiene un Roadmap definido de desarrollo:
+### Características Activas:
+*   ✅ **Endpoints de Estado y Host:** Información del host y consumo de recursos (CPU/RAM/Almacenamiento).
+*   ✅ **CRUD y Ciclo de Vida de Contenedores:** Listado, inspección, creación, eliminación y comandos de energía.
+*   ✅ **WebSockets en Tiempo Real:** Visualización de logs en vivo, consolas interactivas (exec/attach) y telemetría de consumo.
+*   ✅ **Administración de Archivos:** API de ficheros con protección contra Path Traversal, subidas y descargas en `.tar.gz`.
+*   ✅ **Sistema de Respaldos:** Creación de respaldos locales `.tar.gz`, cálculo de hashes SHA256 y rotación de copias obsoletas.
+*   ✅ **Gestión de Imágenes:** Descarga (`pull`) de imágenes con reporte de progreso y búsqueda en registros públicos.
+*   ✅ **Integración de Systemd:** Generación y habilitación de unidades service persistentes a nivel rootless y root.
 
-*   ✅ **Fase 1 completada (API REST Base):**
-    *   Autenticación mediante *Bearer Token* (API Key configurada en `config.toml`).
-    *   Endpoints de estado de salud del proyecto y métricas de memoria/host (`/api/system/info`, `/api/system/resources`).
-    *   Operaciones CRUD de contenedores (listar, crear con mapeo de puertos/volúmenes/límites, inspeccionar, eliminar).
-    *   Ciclo de vida de contenedores (start, stop, restart, kill).
+### 🚫 Desactivado Temporalmente:
+*   **Proxy de Red (Tun2socks):** Lógica sidecar para ruteo de tráfico a través de SOCKS5 en Pods.
+*   **Pilas Multicontenedor (Kubernetes YAML):** Despliegue directo mediante `podman play kube`.
 
-*   **Roadmap Futuro (Fases 2 a 7):**
-    *   *Fase 2:* Consola interactiva, visualización de logs y métricas (CPU/RAM) en tiempo real mediante WebSockets.
-    *   *Fase 3:* Soporte para creación y gestión de Pods completos junto con proxy *tun2socks*.
-    *   *Fase 4:* Despliegue de stacks complejos desde archivos Kubernetes YAML.
-    *   *Fase 5:* File Manager completo (listar, leer, descargar, subir, permisos).
-    *   *Fase 6:* Sistema de Backups (compresión, guardado, checksum, restauración).
-    *   *Fase 7:* Gestión de imágenes de contenedores e integración con *Systemd* para generar servicios automáticamente y proveer auto-arranque en Linux.
+### ⚠️ Características Faltantes respecto a Pterodactyl Wings:
+1.  **Servidor SFTP Incorporado:** Falta de un daemon SFTP nativo en el puerto 2022 para clientes como FileZilla.
+2.  **Watchdog Local:** No hay un hilo local que monitoree caídas y controle bucles de reinicio del servidor.
+3.  **Límite Activo de Cuota de Disco:** Sin bloqueo de escritura activo cuando se supera la cuota máxima física.
+4.  **Ejecución Autónoma de Tareas (Schedules):** La ejecución de tareas cron programadas depende del panel externo.
+5.  **Motor Egg/Nest Parser:** Sin capacidad de edición e inyección dinámica avanzada en archivos de configuración de juegos.
+6.  **Historial de Estadísticas de Consumo:** Las métricas de consumo de CPU/RAM son efímeras y no se guardan en el nodo.
+7.  **SSL Auto-Configuration (ACME):** La generación y renovación de TLS requiere configuración externa.
+8.  **Autenticación en Registros Privados:** No soporta pull de imágenes privadas que requieran autenticación por servidor.
+9.  **Estado de Suspensión:** No hay mecanismo integrado para suspender y bloquear físicamente servidores desactivados.
