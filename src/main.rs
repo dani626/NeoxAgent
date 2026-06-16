@@ -163,8 +163,6 @@ async fn main() {
             get(routes::pods::list_pod_containers)
                 .post(routes::pods::add_container_to_pod),
         )
-        // ─── Volumes ──────────────────────────────────────────────────
-        .nest("/api/volumes", routes::volumes::router())
         // ─── Networks ───────────────────────────────────────────────
         .route(
             "/api/networks",

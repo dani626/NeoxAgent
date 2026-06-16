@@ -7,5 +7,4 @@ pub mod networks;
 pub mod pods;
 pub mod system;
 pub mod systemd;
-pub mod volumes;
 pub mod ws;

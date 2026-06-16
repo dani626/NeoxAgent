@@ -5,4 +5,3 @@ pub mod images;
 pub mod kube;
 pub mod network;
 pub mod pod;
-pub mod volume;

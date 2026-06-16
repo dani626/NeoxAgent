@@ -3,7 +3,6 @@ use std::sync::Arc;
 use podman_api::opts::{
     ContainerCreateOpts, ContainerDeleteOpts, ContainerListOpts, ContainerStopOpts,
     ContainerRestartPolicy,
-    VolumeCreateOpts, VolumeListOpts,
 };
 use podman_api::models::PortMapping as PodmanPortMapping;
 
@@ -11,7 +10,6 @@ use crate::error::AppError;
 use crate::models::container::{
     ContainerResponse, CreateContainerRequest, PortMapping, ResourceLimits,
 };
-use crate::models::volume::{VolumeResponse, CreateVolumeRequest};
 use crate::AppState;
 
 /// Creates a container from the API request using Podman's native SDK.
@@ -493,73 +491,3 @@ pub async fn get_pod_logs(
     Err(AppError::Podman("Pod logs stream not natively supported by Podman API".to_string()))
 }
 
-// ─── Volumes ───────────────────────────────────────────
-
-// list_volumes: struct ListVolume tiene campos String y HashMap directos (sin Option)
-pub async fn list_volumes(state: &Arc<AppState>) -> Result<Vec<VolumeResponse>, AppError> {
-    let opts = VolumeListOpts::builder().build();
-    let volumes = state.podman.volumes().list(&opts).await
-        .map_err(|e| AppError::Podman(format!("Failed to list volumes: {}", e)))?;
-
-    let list = volumes.iter().map(|v| VolumeResponse {
-        name:        v.name.clone(),
-        driver:      v.driver.clone(),
-        mountpoint:  v.mountpoint.clone(),
-        created_at:  v.created_at.clone(),
-        labels:      v.labels.clone(),
-        options:     v.options.clone(),
-    }).collect();
-
-    Ok(list)
-}
-
-// create_volume: struct VolumeConfigResponse tiene campos Option<String>, Option<DateTime<Utc>>, Option<HashMap>
-pub async fn create_volume(state: &Arc<AppState>, req: CreateVolumeRequest) -> Result<VolumeResponse, AppError> {
-    let mut builder = VolumeCreateOpts::builder().name(&req.name);
-
-    if let Some(ref driver) = req.driver {
-        builder = builder.driver(driver);
-    }
-
-    if let Some(ref labels) = req.labels {
-        builder = builder.labels(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    }
-
-    if let Some(ref options) = req.options {
-        builder = builder.options(options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    }
-
-    let opts = builder.build();
-    let volume = state.podman.volumes().create(&opts).await
-        .map_err(|e| AppError::Podman(format!("Failed to create volume: {}", e)))?;
-
-    Ok(VolumeResponse {
-        name:        volume.name.clone().unwrap_or_default(),
-        driver:      volume.driver.clone().unwrap_or_default(),
-        mountpoint:  volume.mountpoint.clone().unwrap_or_default(),
-        created_at:  volume.created_at.map(|dt| dt.to_rfc3339()),
-        labels:      volume.labels.clone().unwrap_or_default(),
-        options:     volume.options.clone().unwrap_or_default(),
-    })
-}
-
-pub async fn delete_volume(state: &Arc<AppState>, name: &str, _force: bool) -> Result<(), AppError> {
-    state.podman.volumes().get(name).remove().await
-        .map_err(|e| AppError::Podman(format!("Failed to delete volume '{}': {}", name, e)))?;
-    Ok(())
-}
-
-// inspect_volume: struct InspectVolumeData tiene campos String y HashMap directos (sin Option)
-pub async fn inspect_volume(state: &Arc<AppState>, name: &str) -> Result<VolumeResponse, AppError> {
-    let volume = state.podman.volumes().get(name).inspect().await
-        .map_err(|e| AppError::Podman(format!("Failed to inspect volume '{}': {}", name, e)))?;
-
-    Ok(VolumeResponse {
-        name:        volume.name.clone(),
-        driver:      volume.driver.clone(),
-        mountpoint:  volume.mountpoint.clone(),
-        created_at:  volume.created_at.clone(),
-        labels:      volume.labels.clone(),
-        options:     volume.options.clone(),
-    })
-}

@@ -82,7 +82,7 @@ echo -e "${BOLD}${CYAN}=== Probando NeoxAgent en ${BASE_URL} ===${RESET}"
 echo -e ""
 
 # --- Test 1: Health Check (Public Endpoint) ---
-info "1/6 — Comprobando endpoint de salud (/api/health)..."
+info "1/5 — Comprobando endpoint de salud (/api/health)..."
 HEALTH_RES=$(curl "${CURL_FLAGS[@]}" "${BASE_URL}/api/health")
 STATUS=$(echo "$HEALTH_RES" | jq -r '.status')
 
@@ -96,7 +96,7 @@ else
 fi
 
 # --- Test 2: System Info (Authenticated) ---
-info "2/6 — Obteniendo información detallada del sistema (/api/system/info)..."
+info "2/5 — Obteniendo información detallada del sistema (/api/system/info)..."
 SYS_INFO=$(curl "${CURL_FLAGS[@]}" "${BASE_URL}/api/system/info" "${HEADERS[@]}")
 HOSTNAME=$(echo "$SYS_INFO" | jq -r '.hostname')
 OS=$(echo "$SYS_INFO" | jq -r '.os')
@@ -110,7 +110,7 @@ ok "Recursos: CPU Cores: $CORES | Memoria Total: ${RAM} MB"
 ok "Modo Podman Rootless: $ROOTLESS"
 
 # --- Test 3: System Resources Telemetry ---
-info "3/6 — Obteniendo telemetría en tiempo real (/api/system/resources)..."
+info "3/5 — Obteniendo telemetría en tiempo real (/api/system/resources)..."
 SYS_RES=$(curl "${CURL_FLAGS[@]}" "${BASE_URL}/api/system/resources" "${HEADERS[@]}")
 RAM_USED=$(echo "$SYS_RES" | jq -r '.memory_used_mb')
 DISK_USED=$(echo "$SYS_RES" | jq -r '.disk_used_gb | tonumber | round')
@@ -119,25 +119,8 @@ DISK_TOTAL=$(echo "$SYS_RES" | jq -r '.disk_total_gb | tonumber | round')
 ok "Uso actual de RAM: ${RAM_USED} MB / ${RAM} MB"
 ok "Uso de Disco: ${DISK_USED} GB / ${DISK_TOTAL} GB"
 
-# --- Test 4: Volumes API CRUD ---
-info "4/6 — Probando API de Volúmenes (Crear -> Inspeccionar -> Eliminar)..."
-VOL_NAME="test-vps-vol-$(date +%s)"
-
-# Create
-CREATE_VOL_RES=$(curl "${CURL_FLAGS[@]}" -X POST "${BASE_URL}/api/volumes" "${HEADERS[@]}" \
-  -d "{\"name\": \"$VOL_NAME\"}")
-ok "Volumen creado: $(echo "$CREATE_VOL_RES" | jq -r '.name')"
-
-# Inspect
-INSPECT_VOL_RES=$(curl "${CURL_FLAGS[@]}" "${BASE_URL}/api/volumes/$VOL_NAME" "${HEADERS[@]}")
-ok "Volumen inspeccionado: $(echo "$INSPECT_VOL_RES" | jq -r '.name') (Driver: $(echo "$INSPECT_VOL_RES" | jq -r '.driver'))"
-
-# Delete
-DELETE_VOL_RES=$(curl "${CURL_FLAGS[@]}" -X DELETE "${BASE_URL}/api/volumes/$VOL_NAME" "${HEADERS[@]}")
-ok "Volumen eliminado con éxito: $(echo "$DELETE_VOL_RES" | jq -r '.message')"
-
-# --- Test 5: Networks API CRUD ---
-info "5/6 — Probando API de Redes Netavark (Crear -> Inspeccionar -> Eliminar)..."
+# --- Test 4: Networks API CRUD ---
+info "4/5 — Probando API de Redes Netavark (Crear -> Inspeccionar -> Eliminar)..."
 NET_NAME="test-vps-net-$(date +%s)"
 
 # Create
@@ -154,8 +137,8 @@ ok "Red inspeccionada: $(echo "$INSPECT_NET_RES" | jq -r '.name') (DNS: $(echo "
 DELETE_NET_RES=$(curl "${CURL_FLAGS[@]}" -X DELETE "${BASE_URL}/api/networks/$NET_ID" "${HEADERS[@]}")
 ok "Red eliminada con éxito: $(echo "$DELETE_NET_RES" | jq -r '.message')"
 
-# --- Test 6: Pod Lifecycle & Containment ---
-info "6/6 — Probando el ciclo de vida de un Pod con contenedores (Crear -> Detener -> Eliminar)..."
+# --- Test 5: Pod Lifecycle & Containment ---
+info "5/5 — Probando el ciclo de vida de un Pod con contenedores (Crear -> Detener -> Eliminar)..."
 POD_NAME="test-vps-pod-$(date +%s)"
 
 # Create Pod
