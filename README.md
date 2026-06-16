@@ -121,3 +121,56 @@ El código se encuentra organizado de la siguiente manera:
 *   [`src/models/`](file:///c:/proyectos/NeoxAgent/src/models/): Definición de esquemas de datos deserializables para requests y serializables para responses.
 *   [`src/routes/`](file:///c:/proyectos/NeoxAgent/src/routes/): Controladores que manejan la lógica de los endpoints HTTP y WebSockets.
 *   [`src/services/`](file:///c:/proyectos/NeoxAgent/src/services/): Lógica intermedia y comunicación directa con la SDK de Podman.
+
+---
+
+## 🚀 Instalación y Pruebas en un VPS
+
+### Requisitos del Host
+- **SO**: Debian 11/12 o Ubuntu 20.04/22.04 (x86_64).
+- **Acceso**: Privilegios de `root` (para la instalación).
+- **Dependencias**: Podman instalado (el script de instalación lo instalará automáticamente si no está presente).
+
+### Instalar / Actualizar en el VPS
+Puedes clonar este repositorio y ejecutar el script principal de instalación:
+```bash
+git clone https://github.com/dani626/NeoxAgent.git
+cd NeoxAgent
+sudo bash scripts/setup.sh
+```
+Otras opciones:
+- `--update`: Actualiza el código a la última versión, recompila y reinicia el servicio manteniendo la configuración.
+- `--reinstall`: Realiza una instalación limpia desde cero eliminando todo lo anterior.
+
+### Pruebas de Funcionamiento
+
+Dispones de scripts en la carpeta `scripts/` para verificar el estado de la instalación de forma local o externa:
+
+#### 1. Verificación local de rutas y servicios (`verify_paths.sh`)
+Se ejecuta directamente en el VPS para verificar que los ejecutables y archivos del servicio están en su lugar:
+```bash
+bash scripts/verify_paths.sh
+```
+
+#### 2. Prueba de ciclo de vida local (`test_lifecycle.sh`)
+Se ejecuta en el VPS para verificar la creación, parada y eliminación de pods a través de la API local:
+```bash
+API_KEY="tu-clave-secreta" PORT=8443 bash scripts/test_lifecycle.sh
+```
+
+#### 3. Prueba de integración desde una máquina externa (`test_vps.sh`)
+Este script se ejecuta desde tu máquina local (o entorno externo con `curl` y `jq` instalados) apuntando a la dirección IP pública del VPS de producción:
+```bash
+# Formato de uso:
+# bash scripts/test_vps.sh -k <api_key> -h <vps_ip> [-p <port>] [-s] [-i]
+#
+# Ejemplo:
+bash scripts/test_vps.sh -k "tu-clave-secreta" -h "192.168.1.100" -p 8443 -i
+```
+Este script realiza pruebas exhaustivas sobre:
+* Endpoint de Salud (`/api/health`)
+* Información y Telemetría del Sistema (`/api/system/info`, `/api/system/resources`)
+* CRUD de Volúmenes (`/api/volumes`)
+* CRUD de Redes (`/api/networks`)
+* Creación, detención y eliminación de Pods reales (`/api/pods`)
+
