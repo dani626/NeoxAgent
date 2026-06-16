@@ -16,6 +16,7 @@ Toda la documentación detallada del proyecto, incluyendo su stack tecnológico,
 *   ✅ **Sistema de Respaldos:** Creación de respaldos locales `.tar.gz`, cálculo de hashes SHA256 y rotación de copias obsoletas.
 *   ✅ **Gestión de Imágenes:** Descarga (`pull`) de imágenes con reporte de progreso y búsqueda en registros públicos.
 *   ✅ **Integración de Systemd:** Generación y habilitación de unidades service persistentes a nivel rootless y root.
+*   ✅ **Cuotas de Disco Activas:** Soporte integrado para límites de espacio a nivel de kernel (cuotas de proyecto de ext4 y XFS) para cada volumen asignado.
 
 ### 🚫 Desactivado Temporalmente:
 *   **Proxy de Red (Tun2socks):** Lógica sidecar para ruteo de tráfico a través de SOCKS5 en Pods.
@@ -24,10 +25,9 @@ Toda la documentación detallada del proyecto, incluyendo su stack tecnológico,
 ### ⚠️ Características Faltantes respecto a Pterodactyl Wings:
 1.  **Servidor SFTP Incorporado:** Falta de un daemon SFTP nativo en el puerto 2022 para clientes como FileZilla.
 2.  **Watchdog Local:** No hay un hilo local que monitoree caídas y controle bucles de reinicio del servidor.
-3.  **Límite Activo de Cuota de Disco:** Sin bloqueo de escritura activo cuando se supera la cuota máxima física.
-4.  **Ejecución Autónoma de Tareas (Schedules):** La ejecución de tareas cron programadas depende del panel externo.
-5.  **Motor Egg/Nest Parser:** Sin capacidad de edición e inyección dinámica avanzada en archivos de configuración de juegos.
-6.  **Historial de Estadísticas de Consumo:** Las métricas de consumo de CPU/RAM son efímeras y no se guardan en el nodo.
-7.  **SSL Auto-Configuration (ACME):** La generación y renovación de TLS requiere configuración externa.
-8.  **Autenticación en Registros Privados:** No soporta pull de imágenes privadas que requieran autenticación por servidor.
-9.  **Estado de Suspensión:** No hay mecanismo integrado para suspender y bloquear físicamente servidores desactivados.
+3.  **Ejecución Autónoma de Tareas (Schedules):** La ejecución de tareas cron programadas depende del panel externo.
+4.  **Motor Egg/Nest Parser:** Sin capacidad de edición e inyección dinámica avanzada en archivos de configuración de juegos.
+5.  **Historial de Estadísticas de Consumo:** Las métricas de consumo de CPU/RAM son efímeras y no se guardan en el nodo.
+6.  **SSL Auto-Configuration (ACME):** La generación y renovación de TLS requiere configuración externa.
+7.  **Autenticación en Registros Privados:** No soporta pull de imágenes privadas que requieran autenticación por servidor.
+8.  **Estado de Suspensión:** No hay mecanismo integrado para suspender y bloquear físicamente servidores desactivados.

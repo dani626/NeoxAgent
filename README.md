@@ -33,7 +33,7 @@ El proyecto está estructurado alrededor de un roadmap de 7 fases funcionales, t
 ### 2. Gestión de Contenedores (CRUD & Lifecycle)
 *   **Operaciones CRUD:** Listar, inspeccionar, crear y eliminar contenedores gestionados por el agente.
 *   **Ciclo de vida:** Métodos HTTP para iniciar (`/start`), detener de forma ordenada con timeout (`/stop`), reiniciar (`/restart`) y forzar la detención (`/kill`) de los procesos.
-*   **Límites de Recursos:** Configuración de cuotas de CPU (cores) y límites estrictos de memoria RAM.
+*   **Límites de Recursos:** Configuración de cuotas de CPU (cores), límites estrictos de memoria RAM y cuotas de disco activas mediante el kernel (ext4/XFS project quotas).
 
 ### 3. Gestión de Pods y Redes (Netavark)
 *   **Gestión de Pods:** Agrupación lógica de contenedores que comparten la misma interfaz de red, dirección IP y localhost (comportamiento idéntico a los Pods de Kubernetes).
@@ -86,25 +86,22 @@ Comparado con el agente oficial de Pterodactyl (*Wings*), `neoxagent` omite o ti
 2.  **Watchdog Local y Monitoreo de Caídas (Crash Detection Loop):**
     *   *Wings:* Mantiene un loop de monitorización interno constante que detecta si un servidor de juegos se ha detenido abruptamente (ej. Out of Memory o código de salida anormal) y aplica políticas dinámicas de reinicio inteligente.
     *   *neoxagent:* Depende de la política de reinicio básica de Podman o Systemd. Carece de un hilo centinela local en Rust con lógica condicional avanzada para evaluar caídas continuas y alertar al panel sobre bucles de reinicio.
-3.  **Límite y Control Activo de Cuota de Disco (Active Disk Quota Enforcement):**
-    *   *Wings:* Monitorea periódicamente de forma activa el uso real de disco del directorio de datos del servidor (usando utilidades del sistema o cuotas XFS/ext4) y bloquea la escritura o suspende el servidor si excede la cuota asignada.
-    *   *neoxagent:* Aunque el modelo acepta límites de disco (`disk_mb`), no cuenta con un sistema centinela en el código que audite activamente el tamaño físico ocupado en disco para imponer bloqueos de escritura.
-4.  **Ejecución Autónoma de Tareas Programadas (Daemon-side Schedules/Cron):**
+3.  **Ejecución Autónoma de Tareas Programadas (Daemon-side Schedules/Cron):**
     *   *Wings:* Aloja un planificador de tareas interno que ejecuta crons locales (reinicios automáticos, backups, comandos de consola) de manera autónoma, incluso si el panel de control web principal se encuentra sin conexión.
     *   *neoxagent:* No tiene un programador de tareas en segundo plano. Toda automatización debe ser gatillada externamente mediante peticiones REST originadas por el panel.
-5.  **Autenticación en Registros Privados (Private Docker Registries Auth):**
+4.  **Autenticación en Registros Privados (Private Docker Registries Auth):**
     *   *Wings:* Permite registrar y pasar credenciales personalizadas para repositorios de imágenes privados de Docker, permitiendo a cada servidor descargar imágenes no públicas de forma segura.
     *   *neoxagent:* Realiza descargas de imágenes públicas y asume que el host ya tiene preconfiguradas las credenciales de Podman para repositorios privados.
-6.  **Motor Egg/Nest Parser (Config Parser Dinámico):**
+5.  **Motor Egg/Nest Parser (Config Parser Dinámico):**
     *   *Wings:* Cuenta con un procesador avanzado de archivos de configuración capaz de abrir, modificar y guardar propiedades en diversos formatos (XML, JSON, INI, YAML, archivos de texto plano) usando expresiones regulares e inyecciones dinámicas definidas en la configuración del servidor de juegos.
     *   *neoxagent:* Carece de un motor parseador de archivos específico de juegos. Las inyecciones de variables se realizan únicamente en el entorno del contenedor.
-7.  **Historial y Almacenamiento de Estadísticas (Resource History/RRD):**
+6.  **Historial y Almacenamiento de Estadísticas (Resource History/RRD):**
     *   *Wings:* Guarda un registro temporal interno de los últimos minutos/horas del consumo de recursos para poder dibujar gráficos de uso histórico en el momento en que el usuario entra al panel.
     *   *neoxagent:* Las estadísticas son efímeras; se transmiten directamente al cliente WebSocket activo y no se guardan en ninguna base de datos ni memoria temporal en el nodo.
-8.  **Estado de Suspensión y Bloqueo Estricto (Server Suspension State):**
+7.  **Estado de Suspensión y Bloqueo Estricto (Server Suspension State):**
     *   *Wings:* Implementa un estado de suspensión que bloquea físicamente la lectura de archivos, impide el arranque del contenedor y deshabilita cualquier acción hasta que el panel envíe la orden de desbloqueo.
     *   *neoxagent:* No dispone de una bandera o middleware de suspensión que bloquee el acceso al sistema de archivos local de los servidores desactivados.
-9.  **SSL Auto-Configuration (ACME / Let's Encrypt nativo):**
+8.  **SSL Auto-Configuration (ACME / Let's Encrypt nativo):**
     *   *Wings:* Puede comunicarse de forma integrada con autoridades de certificación para obtener y renovar automáticamente los certificados TLS necesarios para la comunicación HTTPS.
     *   *neoxagent:* Requiere que los certificados TLS (si están habilitados) se gestionen de forma manual o externa a través de servicios como Certbot.
 
