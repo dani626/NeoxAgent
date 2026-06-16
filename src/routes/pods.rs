@@ -458,6 +458,7 @@ pub async fn create_pod(
             }
         }
         for vol in &ctr_spec.volumes {
+            crate::quota::apply_quota_if_needed(&vol.host_path, &ctr_spec.limits);
             ctr_builder = ctr_builder.mounts([ContainerMount {
                 destination: Some(vol.container_path.clone()),
                 source:      Some(vol.host_path.clone()),
@@ -650,6 +651,7 @@ pub async fn add_container_to_pod(
         .pod(id.as_str())
         .labels(label_map);
     for vol in &ctr.volumes {
+        crate::quota::apply_quota_if_needed(&vol.host_path, &ctr.limits);
         ctr_builder = ctr_builder.mounts([ContainerMount {
             destination: Some(vol.container_path.clone()),
             source:      Some(vol.host_path.clone()),

@@ -13,6 +13,7 @@ mod config;
 mod cors;
 mod error;
 mod models;
+mod quota;
 mod routes;
 mod services;
 mod time_utils;

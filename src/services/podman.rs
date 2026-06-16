@@ -43,6 +43,9 @@ pub async fn create_container(
     }
 
     if !req.volumes.is_empty() {
+        for v in &req.volumes {
+            crate::quota::apply_quota_if_needed(&v.host_path, &req.limits);
+        }
         let mounts: Vec<podman_api::models::ContainerMount> = req
             .volumes
             .iter()
